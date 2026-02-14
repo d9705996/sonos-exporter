@@ -55,7 +55,7 @@ GitHub Actions workflow at `.github/workflows/ci-cd.yml` runs:
 
 - `go test ./...`
 - `golangci-lint`
-- PR review comments for failing tests and lint issues (via reviewdog)
+- PR comments for failing tests and lint issues (sticky PR comment for tests + reviewdog for lint)
 - Docker image build on pull requests
 - Docker image build **and push** to GHCR on pushes to `main`
 

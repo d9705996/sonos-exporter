@@ -25,20 +25,40 @@ jobs:
         with:
           go-version: "1.25.x"
 
-      - name: Run tests (push)
-        if: github.event_name != 'pull_request'
-        run: go test ./...
+      - name: Run tests
+        id: go_test
+        shell: bash
+        run: |
+          set +e
+          go test ./... 2>&1 | tee /tmp/go-test.out
+          status=${PIPESTATUS[0]}
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+          {
+            echo 'output<<EOF'
+            cat /tmp/go-test.out
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Run tests with PR review comments
-        if: github.event_name == 'pull_request'
-        uses: reviewdog/action-go-test@v1
+      - name: Comment test failures on PR
+        if: github.event_name == 'pull_request' && steps.go_test.outputs.exit_code != '0'
+        uses: marocchino/sticky-pull-request-comment@v2
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          reporter: github-pr-review
-          filter_mode: nofilter
-          fail_on_error: 'true'
+          header: go-test-failures
+          message: |
+            ## ❌ Go test failed
 
-      - name: Run golangci-lint (push)
+            ```text
+            ${{ steps.go_test.outputs.output }}
+            ```
+
+      - name: Fail workflow when tests fail
+        if: steps.go_test.outputs.exit_code != '0'
+        run: |
+          echo "go test failed"
+          exit 1
+
+      - name: Run golangci-lint
         if: github.event_name != 'pull_request'
         uses: golangci/golangci-lint-action@v6
         with:
