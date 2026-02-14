@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -41,8 +42,22 @@ type sonosExporter struct {
 	logger     *slog.Logger
 	tracer     trace.Tracer
 	staleAfter time.Duration
+	nowPlaying sync.Map
 	speakersMu sync.RWMutex
 	speakers   map[string]*speaker
+}
+
+type nowPlayingInfo struct {
+	Title  string
+	Artist string
+	Album  string
+	URI    string
+}
+
+type positionSnapshot struct {
+	Position float64
+	Duration float64
+	nowPlayingInfo
 }
 
 type speaker struct {
@@ -92,6 +107,7 @@ var (
 	playModeDesc        = prometheus.NewDesc("sonos_speaker_play_mode", "Current Sonos play mode as labeled state metric.", []string{"uuid", "name", "model", "host", "mode"}, nil)
 	trackPositionDesc   = prometheus.NewDesc("sonos_speaker_track_position_seconds", "Current track playback position in seconds when available.", speakerLabels, nil)
 	trackDurationDesc   = prometheus.NewDesc("sonos_speaker_track_duration_seconds", "Current track duration in seconds when available.", speakerLabels, nil)
+	nowPlayingDesc      = prometheus.NewDesc("sonos_speaker_now_playing_info", "Current Sonos track metadata (value always 1).", []string{"uuid", "name", "model", "host", "title", "artist", "album", "uri"}, nil)
 	lastSeenDesc        = prometheus.NewDesc("sonos_speaker_last_seen_timestamp_seconds", "Unix timestamp when speaker was last discovered.", speakerLabels, nil)
 	discoveryAgeDesc    = prometheus.NewDesc("sonos_speaker_discovery_age_seconds", "Seconds since speaker was last discovered.", speakerLabels, nil)
 	discoveredTotalDesc = prometheus.NewDesc("sonos_exporter_discovered_speakers", "Number of Sonos speakers in exporter cache.", nil, nil)
@@ -198,6 +214,7 @@ func (e *sonosExporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- playModeDesc
 	ch <- trackPositionDesc
 	ch <- trackDurationDesc
+	ch <- nowPlayingDesc
 	ch <- lastSeenDesc
 	ch <- discoveryAgeDesc
 	ch <- discoveredTotalDesc
@@ -221,7 +238,7 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 		loudness, errLoudness := e.getLoudness(ctxSpeaker, sp)
 		playing, errPlay := e.getPlaying(ctxSpeaker, sp)
 		playMode, errPlayMode := e.getPlayMode(ctxSpeaker, sp)
-		positionSeconds, durationSeconds, errPosition := e.getPositionInfo(ctxSpeaker, sp)
+		positionSnapshot, errPosition := e.getPositionSnapshot(ctxSpeaker, sp)
 		uptime, source := e.getUptime(ctxSpeaker, sp)
 
 		up := 1.0
@@ -259,8 +276,14 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(playModeDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, playMode)
 		}
 		if errPosition == nil {
-			ch <- prometheus.MustNewConstMetric(trackPositionDesc, prometheus.GaugeValue, positionSeconds, labelValues...)
-			ch <- prometheus.MustNewConstMetric(trackDurationDesc, prometheus.GaugeValue, durationSeconds, labelValues...)
+			if positionSnapshot.Position >= 0 && positionSnapshot.Duration >= 0 {
+				ch <- prometheus.MustNewConstMetric(trackPositionDesc, prometheus.GaugeValue, positionSnapshot.Position, labelValues...)
+				ch <- prometheus.MustNewConstMetric(trackDurationDesc, prometheus.GaugeValue, positionSnapshot.Duration, labelValues...)
+			}
+			if positionSnapshot.Title != "" || positionSnapshot.Artist != "" || positionSnapshot.Album != "" || positionSnapshot.URI != "" {
+				ch <- prometheus.MustNewConstMetric(nowPlayingDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, positionSnapshot.Title, positionSnapshot.Artist, positionSnapshot.Album, positionSnapshot.URI)
+				e.logNowPlayingChange(sp, positionSnapshot.nowPlayingInfo)
+			}
 		}
 		span.End()
 	}
@@ -324,17 +347,32 @@ func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, e
 	return mode, nil
 }
 
-func (e *sonosExporter) getPositionInfo(ctx context.Context, sp *speaker) (float64, float64, error) {
+func (e *sonosExporter) getPositionSnapshot(ctx context.Context, sp *speaker) (positionSnapshot, error) {
 	resp, err := soapCall(ctx, sp.AVTransportURL, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
-		return 0, 0, err
+		return positionSnapshot{}, err
 	}
-	position := parseDurationString(parseXMLTag(resp, "RelTime"))
-	duration := parseDurationString(parseXMLTag(resp, "TrackDuration"))
-	if position < 0 || duration < 0 {
-		return 0, 0, errors.New("position info unavailable")
+	metadata := html.UnescapeString(parseXMLTag(resp, "TrackMetaData"))
+	return positionSnapshot{
+		Position: parseDurationString(parseXMLTag(resp, "RelTime")),
+		Duration: parseDurationString(parseXMLTag(resp, "TrackDuration")),
+		nowPlayingInfo: nowPlayingInfo{
+			Title:  parseXMLTag(metadata, "dc:title"),
+			Artist: parseXMLTag(metadata, "dc:creator"),
+			Album:  parseXMLTag(metadata, "upnp:album"),
+			URI:    strings.TrimSpace(parseXMLTag(resp, "TrackURI")),
+		},
+	}, nil
+}
+
+func (e *sonosExporter) logNowPlayingChange(sp *speaker, nowPlaying nowPlayingInfo) {
+	if prevRaw, ok := e.nowPlaying.Load(sp.UDN); ok {
+		if prev, ok := prevRaw.(nowPlayingInfo); ok && prev == nowPlaying {
+			return
+		}
 	}
-	return position, duration, nil
+	e.nowPlaying.Store(sp.UDN, nowPlaying)
+	e.logger.Info("sonos now playing", "uuid", sp.UDN, "name", sp.Name, "title", nowPlaying.Title, "artist", nowPlaying.Artist, "album", nowPlaying.Album, "uri", nowPlaying.URI)
 }
 
 func boolToFloat(v bool) float64 {

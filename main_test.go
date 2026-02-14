@@ -82,6 +82,62 @@ sonos_speaker_volume_percent{host="127.0.0.1",model="Arc",name="Living Room",uui
 	}
 }
 
+func TestCollectorExportsNowPlayingMetric(t *testing.T) {
+	t.Parallel()
+
+	soapServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.Header.Get("SOAPACTION") {
+		case `"urn:schemas-upnp-org:service:RenderingControl:1#GetVolume"`:
+			_, _ = fmt.Fprint(w, `<CurrentVolume>22</CurrentVolume>`)
+		case `"urn:schemas-upnp-org:service:RenderingControl:1#GetEQ"`:
+			_, _ = fmt.Fprint(w, `<CurrentValue>5</CurrentValue>`)
+		case `"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"`:
+			_, _ = fmt.Fprint(w, `<CurrentTransportState>PLAYING</CurrentTransportState>`)
+		case `"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo"`:
+			_, _ = fmt.Fprint(w, `<TrackDuration>00:04:00</TrackDuration><RelTime>00:01:30</RelTime><TrackURI>x-sonos-http:track.mp3</TrackURI><TrackMetaData>&lt;dc:title&gt;Song A&lt;/dc:title&gt;&lt;dc:creator&gt;Artist B&lt;/dc:creator&gt;&lt;upnp:album&gt;Album C&lt;/upnp:album&gt;</TrackMetaData>`)
+		default:
+			http.Error(w, "unexpected soap action", http.StatusBadRequest)
+		}
+	}))
+	defer soapServer.Close()
+
+	exporter := newSonosExporter(slog.Default())
+	now := time.Now()
+	exporter.speakers = map[string]*speaker{
+		"uuid:test": {
+			UDN:            "uuid:test",
+			Name:           "Living Room",
+			Model:          "Arc",
+			Version:        "16.0",
+			ModelNumber:    "S27",
+			Host:           "127.0.0.1",
+			RenderingURL:   soapServer.URL + "/RenderingControl/Control",
+			AVTransportURL: soapServer.URL + "/AVTransport/Control",
+			FirstSeen:      now.Add(-10 * time.Minute),
+			LastSeen:       now,
+		},
+	}
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(exporter)
+
+	expected := `
+# HELP sonos_speaker_now_playing_info Current Sonos track metadata (value always 1).
+# TYPE sonos_speaker_now_playing_info gauge
+sonos_speaker_now_playing_info{album="Album C",artist="Artist B",host="127.0.0.1",model="Arc",name="Living Room",title="Song A",uri="x-sonos-http:track.mp3",uuid="uuid:test"} 1
+# HELP sonos_speaker_track_duration_seconds Current track duration in seconds when available.
+# TYPE sonos_speaker_track_duration_seconds gauge
+sonos_speaker_track_duration_seconds{host="127.0.0.1",model="Arc",name="Living Room",uuid="uuid:test"} 240
+# HELP sonos_speaker_track_position_seconds Current track playback position in seconds when available.
+# TYPE sonos_speaker_track_position_seconds gauge
+sonos_speaker_track_position_seconds{host="127.0.0.1",model="Arc",name="Living Room",uuid="uuid:test"} 90
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "sonos_speaker_now_playing_info", "sonos_speaker_track_duration_seconds", "sonos_speaker_track_position_seconds"); err != nil {
+		t.Fatalf("metrics mismatch: %v", err)
+	}
+}
+
 func TestCollectorSkipsSubLevelMetricWhenUnavailable(t *testing.T) {
 	t.Parallel()
 

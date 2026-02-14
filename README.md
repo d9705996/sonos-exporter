@@ -14,6 +14,7 @@ A Prometheus exporter (written in Go) that auto-discovers Sonos speakers on your
 - `sonos_speaker_play_mode{mode=...}` - labeled current play mode (`REPEAT`, `SHUFFLE`, etc.).
 - `sonos_speaker_track_position_seconds` - current playback position when available.
 - `sonos_speaker_track_duration_seconds` - current track duration when available.
+- `sonos_speaker_now_playing_info` - labeled metadata for current track (`title`, `artist`, `album`, `uri`), value is always `1`.
 - `sonos_speaker_sub_level` - current subwoofer level (`SubGain`) when the device exposes it.
 - `sonos_speaker_last_seen_timestamp_seconds` - UNIX timestamp of the latest successful discovery.
 - `sonos_speaker_discovery_age_seconds` - seconds since the speaker was last discovered.
@@ -59,6 +60,8 @@ When `-otel.exporter.otlp.endpoint` is set, the exporter sends:
 - logs over OTLP gRPC
 
 Telemetry includes spans around discovery and speaker metric collection calls, and structured logs are emitted through OpenTelemetry log pipelines.
+
+When track metadata is available, the exporter also logs `sonos now playing` events whenever a speaker changes tracks.
 
 ## Prometheus scrape config
 
