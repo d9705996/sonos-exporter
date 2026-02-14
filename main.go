@@ -8,7 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +19,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -32,6 +34,8 @@ const (
 
 type sonosExporter struct {
 	client     *http.Client
+	logger     *slog.Logger
+	tracer     trace.Tracer
 	speakersMu sync.RWMutex
 	speakers   map[string]*speaker
 }
@@ -79,31 +83,37 @@ var (
 	infoDesc      = prometheus.NewDesc("sonos_speaker_info", "Static Sonos speaker info metric with software/model labels.", []string{"uuid", "name", "model", "host", "version", "model_number"}, nil)
 )
 
-func newSonosExporter() *sonosExporter {
+func newSonosExporter(logger *slog.Logger) *sonosExporter {
 	return &sonosExporter{
 		client:   &http.Client{Timeout: deviceReqTimeout},
+		logger:   logger,
+		tracer:   otel.Tracer("sonos-exporter"),
 		speakers: make(map[string]*speaker),
 	}
 }
 
 func (e *sonosExporter) startDiscovery(ctx context.Context, interval, timeout time.Duration) {
+	ctx, span := e.tracer.Start(ctx, "discovery.loop")
+	defer span.End()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	e.refreshSpeakers(timeout)
+	e.refreshSpeakers(ctx, timeout)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.refreshSpeakers(timeout)
+			e.refreshSpeakers(ctx, timeout)
 		}
 	}
 }
 
-func (e *sonosExporter) refreshSpeakers(discoveryTimeout time.Duration) {
+func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout time.Duration) {
+	ctx, span := e.tracer.Start(ctx, "discovery.refresh")
+	defer span.End()
 	discovered, err := discoverSonos(discoveryTimeout)
 	if err != nil {
-		log.Printf("discovery error: %v", err)
+		e.logger.Error("discovery error", "error", err)
 		return
 	}
 	now := time.Now()
@@ -148,12 +158,14 @@ func (e *sonosExporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
+	ctx := context.Background()
 	for _, sp := range e.getSpeakers() {
+		ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect")
 		labelValues := []string{sp.UDN, sp.Name, sp.Model, sp.Host}
-		volume, errVol := e.getVolume(sp)
-		subLevel, errSub := e.getSubLevel(sp)
-		playing, errPlay := e.getPlaying(sp)
-		uptime, source := e.getUptime(sp)
+		volume, errVol := e.getVolume(ctxSpeaker, sp)
+		subLevel, errSub := e.getSubLevel(ctxSpeaker, sp)
+		playing, errPlay := e.getPlaying(ctxSpeaker, sp)
+		uptime, source := e.getUptime(ctxSpeaker, sp)
 
 		up := 1.0
 		if errVol != nil && errPlay != nil {
@@ -176,11 +188,14 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- prometheus.MustNewConstMetric(playingDesc, prometheus.GaugeValue, playVal, labelValues...)
 		}
+		span.End()
 	}
 }
 
-func (e *sonosExporter) getSubLevel(sp *speaker) (float64, error) {
-	resp, err := soapCall(sp.RenderingURL, "urn:schemas-upnp-org:service:RenderingControl:1", "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
+func (e *sonosExporter) getSubLevel(ctx context.Context, sp *speaker) (float64, error) {
+	_, span := e.tracer.Start(ctx, "speaker.get_sub_level")
+	defer span.End()
+	resp, err := soapCall(ctx, sp.RenderingURL, "urn:schemas-upnp-org:service:RenderingControl:1", "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -304,16 +319,20 @@ func resolveURL(baseURL, p string) string {
 	return base.ResolveReference(rel).String()
 }
 
-func (e *sonosExporter) getVolume(sp *speaker) (float64, error) {
-	resp, err := soapCall(sp.RenderingURL, "urn:schemas-upnp-org:service:RenderingControl:1", "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
+func (e *sonosExporter) getVolume(ctx context.Context, sp *speaker) (float64, error) {
+	_, span := e.tracer.Start(ctx, "speaker.get_volume")
+	defer span.End()
+	resp, err := soapCall(ctx, sp.RenderingURL, "urn:schemas-upnp-org:service:RenderingControl:1", "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentVolume"), 64)
 }
 
-func (e *sonosExporter) getPlaying(sp *speaker) (bool, error) {
-	resp, err := soapCall(sp.AVTransportURL, "urn:schemas-upnp-org:service:AVTransport:1", "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
+func (e *sonosExporter) getPlaying(ctx context.Context, sp *speaker) (bool, error) {
+	_, span := e.tracer.Start(ctx, "speaker.get_playing")
+	defer span.End()
+	resp, err := soapCall(ctx, sp.AVTransportURL, "urn:schemas-upnp-org:service:AVTransport:1", "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -321,8 +340,10 @@ func (e *sonosExporter) getPlaying(sp *speaker) (bool, error) {
 	return state == "PLAYING" || state == "TRANSITIONING", nil
 }
 
-func (e *sonosExporter) getUptime(sp *speaker) (float64, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), soapTimeout)
+func (e *sonosExporter) getUptime(ctx context.Context, sp *speaker) (float64, string) {
+	_, span := e.tracer.Start(ctx, "speaker.get_uptime")
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, soapTimeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:1400/status/zp", sp.Host), nil)
 	resp, err := e.client.Do(req)
@@ -342,7 +363,7 @@ func (e *sonosExporter) getUptime(sp *speaker) (float64, string) {
 	return time.Since(sp.FirstSeen).Seconds(), "observed"
 }
 
-func soapCall(controlURL, serviceURN, action string, args map[string]string, timeout time.Duration) (string, error) {
+func soapCall(parent context.Context, controlURL, serviceURN, action string, args map[string]string, timeout time.Duration) (string, error) {
 	var body bytes.Buffer
 	body.WriteString(`<?xml version="1.0" encoding="utf-8"?>`)
 	body.WriteString(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>`)
@@ -352,7 +373,7 @@ func soapCall(controlURL, serviceURN, action string, args map[string]string, tim
 	}
 	body.WriteString(`</u:` + action + `></s:Body></s:Envelope>`)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, controlURL, bytes.NewReader(body.Bytes()))
 	if err != nil {
@@ -412,11 +433,30 @@ func main() {
 	metricsPath := flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
 	discoveryInterval := flag.Duration("sonos.discovery-interval", defaultDiscoveryInterval, "How often to rediscover speakers")
 	discoveryTimeout := flag.Duration("sonos.discovery-timeout", defaultDiscoveryTimeout, "How long SSDP discovery waits for responses")
+	otelEndpoint := flag.String("otel.exporter.otlp.endpoint", "", "OTLP endpoint for OpenTelemetry logs and traces (e.g. localhost:4317)")
+	otelInsecure := flag.Bool("otel.exporter.otlp.insecure", true, "Use insecure OTLP gRPC connection")
 	flag.Parse()
 
-	exporter := newSonosExporter()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	logger := fallbackLogger()
+	if *otelEndpoint != "" {
+		shutdownTelemetry, otelLogger, err := initTelemetry(ctx, "sonos-exporter", *otelEndpoint, *otelInsecure)
+		if err != nil {
+			logger.Error("failed to initialize OpenTelemetry, using fallback logger", "error", err)
+		} else {
+			logger = otelLogger
+			defer func() {
+				shutdownCtx, shutdownCancel := withTimeoutContext(context.Background())
+				defer shutdownCancel()
+				if err := shutdownTelemetry(shutdownCtx); err != nil {
+					logger.Error("failed to shutdown telemetry", "error", err)
+				}
+			}()
+		}
+	}
+
+	exporter := newSonosExporter(logger)
 	go exporter.startDiscovery(ctx, *discoveryInterval, *discoveryTimeout)
 
 	registry := prometheus.NewRegistry()
@@ -427,6 +467,8 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "<html><head><title>Sonos Exporter</title></head><body><h1>Sonos Exporter</h1><p><a href='%s'>Metrics</a></p></body></html>", *metricsPath)
 	})
-	log.Printf("starting sonos_exporter on %s", *listenAddr)
-	log.Fatal(http.ListenAndServe(*listenAddr, nil))
+	logger.Info("starting sonos_exporter", "listen_address", *listenAddr, "metrics_path", *metricsPath)
+	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
+		logger.Error("http server exited", "error", err)
+	}
 }

@@ -35,6 +35,18 @@ Flags:
 - `-web.telemetry-path` (default `/metrics`)
 - `-sonos.discovery-interval` (default `60s`)
 - `-sonos.discovery-timeout` (default `3s`)
+- `-otel.exporter.otlp.endpoint` (optional OTLP gRPC endpoint for logs/traces, e.g. `otel-collector:4317`)
+- `-otel.exporter.otlp.insecure` (default `true`, use plaintext OTLP gRPC)
+
+
+## OpenTelemetry
+
+When `-otel.exporter.otlp.endpoint` is set, the exporter sends:
+
+- traces over OTLP gRPC
+- logs over OTLP gRPC
+
+Telemetry includes spans around discovery and speaker metric collection calls, and structured logs are emitted through OpenTelemetry log pipelines.
 
 ## Prometheus scrape config
 
