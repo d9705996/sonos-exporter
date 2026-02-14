@@ -29,6 +29,7 @@ const (
 	sonosDeviceType          = "urn:schemas-upnp-org:device:ZonePlayer:1"
 	defaultDiscoveryInterval = 60 * time.Second
 	defaultDiscoveryTimeout  = 3 * time.Second
+	defaultSpeakerStaleAfter = 10 * time.Minute
 	deviceReqTimeout         = 4 * time.Second
 	soapTimeout              = 3 * time.Second
 	renderingControlService  = "urn:schemas-upnp-org:service:RenderingControl:1"
@@ -39,6 +40,7 @@ type sonosExporter struct {
 	client     *http.Client
 	logger     *slog.Logger
 	tracer     trace.Tracer
+	staleAfter time.Duration
 	speakersMu sync.RWMutex
 	speakers   map[string]*speaker
 }
@@ -61,6 +63,7 @@ type deviceDescription struct {
 		FriendlyName string `xml:"friendlyName"`
 		ModelName    string `xml:"modelName"`
 		ModelNumber  string `xml:"modelNumber"`
+		Version      string `xml:"softwareVersion"`
 		UDN          string `xml:"UDN"`
 		ServiceList  struct {
 			Services []struct {
@@ -97,11 +100,16 @@ var (
 )
 
 func newSonosExporter(logger *slog.Logger) *sonosExporter {
+	return newSonosExporterWithOptions(logger, defaultSpeakerStaleAfter)
+}
+
+func newSonosExporterWithOptions(logger *slog.Logger, staleAfter time.Duration) *sonosExporter {
 	return &sonosExporter{
-		client:   &http.Client{Timeout: deviceReqTimeout},
-		logger:   logger,
-		tracer:   otel.Tracer("sonos-exporter"),
-		speakers: make(map[string]*speaker),
+		client:     &http.Client{Timeout: deviceReqTimeout},
+		logger:     logger,
+		tracer:     otel.Tracer("sonos-exporter"),
+		staleAfter: staleAfter,
+		speakers:   make(map[string]*speaker),
 	}
 }
 
@@ -130,9 +138,11 @@ func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout ti
 		return
 	}
 	now := time.Now()
+	discoveredNow := make(map[string]struct{}, len(discovered))
 	e.speakersMu.Lock()
 	defer e.speakersMu.Unlock()
 	for _, sp := range discovered {
+		discoveredNow[sp.UDN] = struct{}{}
 		if existing, ok := e.speakers[sp.UDN]; ok {
 			existing.Name = sp.Name
 			existing.Model = sp.Model
@@ -147,6 +157,21 @@ func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout ti
 		sp.FirstSeen = now
 		sp.LastSeen = now
 		e.speakers[sp.UDN] = sp
+	}
+	e.evictStaleLocked(now, discoveredNow)
+}
+
+func (e *sonosExporter) evictStaleLocked(now time.Time, discoveredNow map[string]struct{}) {
+	if e.staleAfter <= 0 {
+		return
+	}
+	for udn, sp := range e.speakers {
+		if _, ok := discoveredNow[udn]; ok {
+			continue
+		}
+		if now.Sub(sp.LastSeen) > e.staleAfter {
+			delete(e.speakers, udn)
+		}
 	}
 }
 
@@ -417,7 +442,7 @@ func speakerFromDescription(client *http.Client, location string) (*speaker, err
 	if u, err := url.Parse(baseURL); err == nil {
 		host = u.Hostname()
 	}
-	return &speaker{UDN: desc.Device.UDN, Name: desc.Device.FriendlyName, Model: desc.Device.ModelName, Version: desc.Device.ModelNumber, ModelNumber: desc.Device.ModelNumber, Host: host, RenderingURL: renderingURL, AVTransportURL: avTransportURL}, nil
+	return &speaker{UDN: desc.Device.UDN, Name: desc.Device.FriendlyName, Model: desc.Device.ModelName, Version: desc.Device.Version, ModelNumber: desc.Device.ModelNumber, Host: host, RenderingURL: renderingURL, AVTransportURL: avTransportURL}, nil
 }
 
 func resolveURL(baseURL, p string) string {
@@ -546,6 +571,7 @@ func main() {
 	metricsPath := flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
 	discoveryInterval := flag.Duration("sonos.discovery-interval", defaultDiscoveryInterval, "How often to rediscover speakers")
 	discoveryTimeout := flag.Duration("sonos.discovery-timeout", defaultDiscoveryTimeout, "How long SSDP discovery waits for responses")
+	speakerStaleAfter := flag.Duration("sonos.speaker-stale-after", defaultSpeakerStaleAfter, "How long to keep a speaker in cache without rediscovery (0 disables eviction)")
 	otelEndpoint := flag.String("otel.exporter.otlp.endpoint", "", "OTLP endpoint for OpenTelemetry logs and traces (e.g. localhost:4317)")
 	otelInsecure := flag.Bool("otel.exporter.otlp.insecure", true, "Use insecure OTLP gRPC connection")
 	flag.Parse()
@@ -569,7 +595,7 @@ func main() {
 		}
 	}
 
-	exporter := newSonosExporter(logger)
+	exporter := newSonosExporterWithOptions(logger, *speakerStaleAfter)
 	go exporter.startDiscovery(ctx, *discoveryInterval, *discoveryTimeout)
 
 	registry := prometheus.NewRegistry()

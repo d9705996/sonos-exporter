@@ -19,7 +19,7 @@ A Prometheus exporter (written in Go) that auto-discovers Sonos speakers on your
 - `sonos_speaker_discovery_age_seconds` - seconds since the speaker was last discovered.
 - `sonos_exporter_discovered_speakers` - total speakers currently in exporter cache.
 - `sonos_speaker_uptime_seconds` - speaker uptime from `/status/zp` when available, otherwise observed uptime since first discovery (`source` label indicates which).
-- `sonos_speaker_info` - static info metric (value always `1`) with labels for model/version.
+- `sonos_speaker_info` - static info metric (value always `1`) with labels for model/software version.
 
 All metrics include identifying labels:
 
@@ -46,6 +46,7 @@ Flags:
 - `-web.telemetry-path` (default `/metrics`)
 - `-sonos.discovery-interval` (default `60s`)
 - `-sonos.discovery-timeout` (default `3s`)
+- `-sonos.speaker-stale-after` (default `10m`, set `0` to keep speakers indefinitely even if offline)
 - `-otel.exporter.otlp.endpoint` (optional OTLP gRPC endpoint for logs/traces, e.g. `otel-collector:4317`)
 - `-otel.exporter.otlp.insecure` (default `true`, use plaintext OTLP gRPC)
 

@@ -140,3 +140,71 @@ sonos_speaker_volume_percent{host="127.0.0.1",model="Arc",name="Living Room",uui
 		t.Fatalf("expected no sub-level metrics, got %d", gotSub)
 	}
 }
+
+func TestRefreshSpeakersEvictsStaleSpeakers(t *testing.T) {
+	t.Parallel()
+
+	exporter := newSonosExporterWithOptions(slog.Default(), time.Minute)
+	now := time.Now()
+	exporter.speakers = map[string]*speaker{
+		"uuid:gone": {
+			UDN:      "uuid:gone",
+			Name:     "Kitchen",
+			LastSeen: now.Add(-2 * time.Minute),
+		},
+		"uuid:fresh": {
+			UDN:      "uuid:fresh",
+			Name:     "Office",
+			LastSeen: now.Add(-30 * time.Second),
+		},
+	}
+
+	exporter.speakersMu.Lock()
+	exporter.evictStaleLocked(now, map[string]struct{}{"uuid:fresh": {}})
+	exporter.speakersMu.Unlock()
+
+	speakers := exporter.getSpeakers()
+	if len(speakers) != 1 {
+		t.Fatalf("expected one speaker after stale eviction, got %d", len(speakers))
+	}
+	if speakers[0].UDN != "uuid:fresh" {
+		t.Fatalf("expected fresh speaker to remain, got %q", speakers[0].UDN)
+	}
+}
+
+func TestSpeakerFromDescriptionUsesSoftwareVersion(t *testing.T) {
+	t.Parallel()
+
+	descServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `<?xml version="1.0"?>
+<root>
+  <URLBase>http://`+r.Host+`</URLBase>
+  <device>
+    <friendlyName>Bedroom</friendlyName>
+    <modelName>Era 100</modelName>
+    <modelNumber>E10</modelNumber>
+    <softwareVersion>17.2-12345</softwareVersion>
+    <UDN>uuid:bedroom</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+        <controlURL>/MediaRenderer/RenderingControl/Control</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <controlURL>/MediaRenderer/AVTransport/Control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>`)
+	}))
+	defer descServer.Close()
+
+	sp, err := speakerFromDescription(descServer.Client(), descServer.URL)
+	if err != nil {
+		t.Fatalf("speakerFromDescription failed: %v", err)
+	}
+	if sp.Version != "17.2-12345" {
+		t.Fatalf("expected software version, got %q", sp.Version)
+	}
+}
