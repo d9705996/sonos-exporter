@@ -1,6 +1,6 @@
 # sonos-exporter
 
-A Prometheus exporter (written in Go) that auto-discovers Sonos speakers on your network and exports key playback/health metrics.
+A Prometheus exporter (written in Go) that auto-discovers Sonos speakers on your network and exports key playback/health metrics using the official Prometheus Go client library.
 
 ## What it collects
 
@@ -32,6 +32,8 @@ Flags:
 
 - `-web.listen-address` (default `:9798`)
 - `-web.telemetry-path` (default `/metrics`)
+- `-sonos.discovery-interval` (default `60s`)
+- `-sonos.discovery-timeout` (default `3s`)
 
 ## Prometheus scrape config
 
@@ -46,8 +48,9 @@ scrape_configs:
 ## Notes
 
 - Discovery uses SSDP `M-SEARCH` for `urn:schemas-upnp-org:device:ZonePlayer:1`.
-- Exporter refreshes discovered speakers every 60 seconds.
+- Exporter refreshes discovered speakers every 60 seconds by default (configurable via `-sonos.discovery-interval`).
 - Make sure UDP multicast and TCP access to Sonos speakers are allowed from where the exporter runs.
+- For Docker deployments (for example QNAP), `network_mode: host` is recommended so SSDP multicast discovery works reliably.
 
 ## CI/CD
 

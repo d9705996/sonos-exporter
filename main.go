@@ -16,15 +16,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
-	ssdpAddr          = "239.255.255.250:1900"
-	sonosDeviceType   = "urn:schemas-upnp-org:device:ZonePlayer:1"
-	discoveryInterval = 60 * time.Second
-	discoveryTimeout  = 3 * time.Second
-	deviceReqTimeout  = 4 * time.Second
-	soapTimeout       = 3 * time.Second
+	ssdpAddr                 = "239.255.255.250:1900"
+	sonosDeviceType          = "urn:schemas-upnp-org:device:ZonePlayer:1"
+	defaultDiscoveryInterval = 60 * time.Second
+	defaultDiscoveryTimeout  = 3 * time.Second
+	deviceReqTimeout         = 4 * time.Second
+	soapTimeout              = 3 * time.Second
 )
 
 type sonosExporter struct {
@@ -66,6 +69,15 @@ type zonePlayerStatus struct {
 	Uptime string `xml:"uptime"`
 }
 
+var (
+	speakerLabels = []string{"uuid", "name", "model", "host"}
+	upDesc        = prometheus.NewDesc("sonos_speaker_up", "Whether the Sonos speaker is reachable during scrape (1=up, 0=down).", speakerLabels, nil)
+	volumeDesc    = prometheus.NewDesc("sonos_speaker_volume_percent", "Current Sonos volume percentage.", speakerLabels, nil)
+	playingDesc   = prometheus.NewDesc("sonos_speaker_is_playing", "Whether Sonos reports currently playing (1=playing, 0=not).", speakerLabels, nil)
+	uptimeDesc    = prometheus.NewDesc("sonos_speaker_uptime_seconds", "Speaker uptime in seconds if known; otherwise exporter-observed uptime.", []string{"uuid", "name", "model", "host", "source"}, nil)
+	infoDesc      = prometheus.NewDesc("sonos_speaker_info", "Static Sonos speaker info metric with software/model labels.", []string{"uuid", "name", "model", "host", "version", "model_number"}, nil)
+)
+
 func newSonosExporter() *sonosExporter {
 	return &sonosExporter{
 		client:   &http.Client{Timeout: deviceReqTimeout},
@@ -73,21 +85,21 @@ func newSonosExporter() *sonosExporter {
 	}
 }
 
-func (e *sonosExporter) startDiscovery(ctx context.Context) {
-	ticker := time.NewTicker(discoveryInterval)
+func (e *sonosExporter) startDiscovery(ctx context.Context, interval, timeout time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	e.refreshSpeakers()
+	e.refreshSpeakers(timeout)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.refreshSpeakers()
+			e.refreshSpeakers(timeout)
 		}
 	}
 }
 
-func (e *sonosExporter) refreshSpeakers() {
+func (e *sonosExporter) refreshSpeakers(discoveryTimeout time.Duration) {
 	discovered, err := discoverSonos(discoveryTimeout)
 	if err != nil {
 		log.Printf("discovery error: %v", err)
@@ -125,22 +137,17 @@ func (e *sonosExporter) getSpeakers() []*speaker {
 	return out
 }
 
-func (e *sonosExporter) metricsHandler(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	var b strings.Builder
-	b.WriteString("# HELP sonos_speaker_up Whether the Sonos speaker is reachable during scrape (1=up, 0=down).\n")
-	b.WriteString("# TYPE sonos_speaker_up gauge\n")
-	b.WriteString("# HELP sonos_speaker_volume_percent Current Sonos volume percentage.\n")
-	b.WriteString("# TYPE sonos_speaker_volume_percent gauge\n")
-	b.WriteString("# HELP sonos_speaker_is_playing Whether Sonos reports currently playing (1=playing, 0=not).\n")
-	b.WriteString("# TYPE sonos_speaker_is_playing gauge\n")
-	b.WriteString("# HELP sonos_speaker_uptime_seconds Speaker uptime in seconds if known; otherwise exporter-observed uptime.\n")
-	b.WriteString("# TYPE sonos_speaker_uptime_seconds gauge\n")
-	b.WriteString("# HELP sonos_speaker_info Static Sonos speaker info metric with software/model labels.\n")
-	b.WriteString("# TYPE sonos_speaker_info gauge\n")
+func (e *sonosExporter) Describe(ch chan<- *prometheus.Desc) {
+	ch <- upDesc
+	ch <- volumeDesc
+	ch <- playingDesc
+	ch <- uptimeDesc
+	ch <- infoDesc
+}
 
+func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 	for _, sp := range e.getSpeakers() {
-		labels := map[string]string{"uuid": sp.UDN, "name": sp.Name, "model": sp.Model, "host": sp.Host}
+		labelValues := []string{sp.UDN, sp.Name, sp.Model, sp.Host}
 		volume, errVol := e.getVolume(sp)
 		playing, errPlay := e.getPlaying(sp)
 		uptime, source := e.getUptime(sp)
@@ -149,48 +156,21 @@ func (e *sonosExporter) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 		if errVol != nil && errPlay != nil {
 			up = 0
 		}
-		b.WriteString(renderMetric("sonos_speaker_up", labels, up))
-		infoLabels := cloneLabels(labels)
-		infoLabels["version"] = sp.Version
-		infoLabels["model_number"] = sp.ModelNumber
-		b.WriteString(renderMetric("sonos_speaker_info", infoLabels, 1))
+		ch <- prometheus.MustNewConstMetric(upDesc, prometheus.GaugeValue, up, labelValues...)
+		ch <- prometheus.MustNewConstMetric(infoDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, sp.Version, sp.ModelNumber)
+		ch <- prometheus.MustNewConstMetric(uptimeDesc, prometheus.GaugeValue, uptime, sp.UDN, sp.Name, sp.Model, sp.Host, source)
 
 		if errVol == nil {
-			b.WriteString(renderMetric("sonos_speaker_volume_percent", labels, volume))
+			ch <- prometheus.MustNewConstMetric(volumeDesc, prometheus.GaugeValue, volume, labelValues...)
 		}
 		if errPlay == nil {
 			playVal := 0.0
 			if playing {
 				playVal = 1
 			}
-			b.WriteString(renderMetric("sonos_speaker_is_playing", labels, playVal))
+			ch <- prometheus.MustNewConstMetric(playingDesc, prometheus.GaugeValue, playVal, labelValues...)
 		}
-		uptimeLabels := cloneLabels(labels)
-		uptimeLabels["source"] = source
-		b.WriteString(renderMetric("sonos_speaker_uptime_seconds", uptimeLabels, uptime))
 	}
-
-	_, _ = io.WriteString(w, b.String())
-}
-
-func renderMetric(name string, labels map[string]string, value float64) string {
-	var parts []string
-	for k, v := range labels {
-		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapeLabel(v)))
-	}
-	return fmt.Sprintf("%s{%s} %g\n", name, strings.Join(parts, ","), value)
-}
-
-func cloneLabels(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in)+2)
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func escapeLabel(v string) string {
-	return strings.NewReplacer("\\", "\\\\", "\n", "\\n", `"`, `\"`).Replace(v)
 }
 
 func discoverSonos(timeout time.Duration) ([]*speaker, error) {
@@ -412,14 +392,20 @@ func xmlEscape(s string) string {
 func main() {
 	listenAddr := flag.String("web.listen-address", ":9798", "Address to listen on for HTTP requests")
 	metricsPath := flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
+	discoveryInterval := flag.Duration("sonos.discovery-interval", defaultDiscoveryInterval, "How often to rediscover speakers")
+	discoveryTimeout := flag.Duration("sonos.discovery-timeout", defaultDiscoveryTimeout, "How long SSDP discovery waits for responses")
 	flag.Parse()
 
 	exporter := newSonosExporter()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go exporter.startDiscovery(ctx)
+	go exporter.startDiscovery(ctx, *discoveryInterval, *discoveryTimeout)
 
-	http.HandleFunc(*metricsPath, exporter.metricsHandler)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(exporter)
+	metricsHandler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+
+	http.Handle(*metricsPath, metricsHandler)
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "<html><head><title>Sonos Exporter</title></head><body><h1>Sonos Exporter</h1><p><a href='%s'>Metrics</a></p></body></html>", *metricsPath)
 	})
