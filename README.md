@@ -55,10 +55,10 @@ GitHub Actions workflows run as follows:
 
 - `.github/workflows/ci.yml` for lint/test/vuln checks
 - `.github/workflows/docker.yml` for Docker build/publish (only on push to `main`)
+- `.github/workflows/dockerfile-lint.yml` for Dockerfile lint (runs only when `Dockerfile` changes)
 - `go test` coverage profile generation (`cover.out`) + `go-test-coverage` status check
 - `golangci-lint` (pinned CLI run in CI)
 - `golang-vulncheck` action
-- Dockerfile linting via `hadolint` runs only when `Dockerfile` changes
 
 Published image:
 

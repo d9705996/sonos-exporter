@@ -47,16 +47,3 @@ jobs:
           go-package: ./...
           go-version-input: "1.25.x"
 
-      - name: Detect Dockerfile changes
-        id: docker_changes
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            dockerfile:
-              - 'Dockerfile'
-
-      - name: Lint Dockerfile
-        if: steps.docker_changes.outputs.dockerfile == 'true'
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
