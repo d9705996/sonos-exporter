@@ -4,10 +4,20 @@ A Prometheus exporter (written in Go) that auto-discovers Sonos speakers on your
 
 ## What it collects
 
-- `sonos_speaker_up` - 1 if the speaker responded to metric collection calls.
+- `sonos_speaker_up` - 1 if the speaker responded to core metric collection calls.
 - `sonos_speaker_volume_percent` - current master volume (0-100).
+- `sonos_speaker_mute` - mute state (`1` muted, `0` unmuted).
+- `sonos_speaker_bass` - current bass EQ level.
+- `sonos_speaker_treble` - current treble EQ level.
+- `sonos_speaker_loudness` - loudness state (`1` enabled, `0` disabled).
 - `sonos_speaker_is_playing` - 1 when transport state is `PLAYING` or `TRANSITIONING`.
+- `sonos_speaker_play_mode{mode=...}` - labeled current play mode (`REPEAT`, `SHUFFLE`, etc.).
+- `sonos_speaker_track_position_seconds` - current playback position when available.
+- `sonos_speaker_track_duration_seconds` - current track duration when available.
 - `sonos_speaker_sub_level` - current subwoofer level (`SubGain`) when the device exposes it.
+- `sonos_speaker_last_seen_timestamp_seconds` - UNIX timestamp of the latest successful discovery.
+- `sonos_speaker_discovery_age_seconds` - seconds since the speaker was last discovered.
+- `sonos_exporter_discovered_speakers` - total speakers currently in exporter cache.
 - `sonos_speaker_uptime_seconds` - speaker uptime from `/status/zp` when available, otherwise observed uptime since first discovery (`source` label indicates which).
 - `sonos_speaker_info` - static info metric (value always `1`) with labels for model/version.
 
@@ -28,6 +38,7 @@ Default endpoint is:
 
 - metrics: `http://localhost:9798/metrics`
 - UI root: `http://localhost:9798/`
+- debug speaker cache: `http://localhost:9798/debug/speakers`
 
 Flags:
 
@@ -61,6 +72,7 @@ scrape_configs:
 ## Notes
 
 - Discovery uses SSDP `M-SEARCH` for `urn:schemas-upnp-org:device:ZonePlayer:1`.
+- Runtime collection uses Sonos APIs on port `1400`: RenderingControl (`GetVolume`, `GetMute`, `GetBass`, `GetTreble`, `GetLoudness`, `GetEQ`) and AVTransport (`GetTransportInfo`, `GetTransportSettings`, `GetPositionInfo`) plus `/status/zp`.
 - Exporter refreshes discovered speakers every 60 seconds by default (configurable via `-sonos.discovery-interval`).
 - Make sure UDP multicast and TCP access to Sonos speakers are allowed from where the exporter runs.
 - For Docker deployments (for example QNAP), `network_mode: host` is recommended so SSDP multicast discovery works reliably.
