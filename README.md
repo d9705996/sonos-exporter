@@ -51,13 +51,14 @@ scrape_configs:
 
 ## CI/CD
 
-GitHub Actions workflow at `.github/workflows/ci-cd.yml` runs:
+GitHub Actions workflows run as follows:
 
-- `go test` coverage profile generation (`cover.out`) + `go-test-coverage` action (coverage checks + PR comments)
+- `.github/workflows/ci.yml` for lint/test/vuln checks
+- `.github/workflows/docker.yml` for Docker build/publish (only on push to `main`)
+- `go test` coverage profile generation (`cover.out`) + `go-test-coverage` status check
 - `golangci-lint` action
 - `golang-vulncheck` action
 - Dockerfile linting via `hadolint` runs only when `Dockerfile` changes
-- Docker image build/push to GHCR runs only on pushes to `main` (e.g., after PR merge)
 
 Published image:
 
