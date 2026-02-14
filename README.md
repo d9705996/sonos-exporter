@@ -7,6 +7,7 @@ A Prometheus exporter (written in Go) that auto-discovers Sonos speakers on your
 - `sonos_speaker_up` - 1 if the speaker responded to metric collection calls.
 - `sonos_speaker_volume_percent` - current master volume (0-100).
 - `sonos_speaker_is_playing` - 1 when transport state is `PLAYING` or `TRANSITIONING`.
+- `sonos_speaker_sub_level` - current subwoofer level (`SubGain`) when the device exposes it.
 - `sonos_speaker_uptime_seconds` - speaker uptime from `/status/zp` when available, otherwise observed uptime since first discovery (`source` label indicates which).
 - `sonos_speaker_info` - static info metric (value always `1`) with labels for model/version.
 

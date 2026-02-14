@@ -73,6 +73,7 @@ var (
 	speakerLabels = []string{"uuid", "name", "model", "host"}
 	upDesc        = prometheus.NewDesc("sonos_speaker_up", "Whether the Sonos speaker is reachable during scrape (1=up, 0=down).", speakerLabels, nil)
 	volumeDesc    = prometheus.NewDesc("sonos_speaker_volume_percent", "Current Sonos volume percentage.", speakerLabels, nil)
+	subLevelDesc  = prometheus.NewDesc("sonos_speaker_sub_level", "Current Sonos subwoofer level (SubGain) when available.", speakerLabels, nil)
 	playingDesc   = prometheus.NewDesc("sonos_speaker_is_playing", "Whether Sonos reports currently playing (1=playing, 0=not).", speakerLabels, nil)
 	uptimeDesc    = prometheus.NewDesc("sonos_speaker_uptime_seconds", "Speaker uptime in seconds if known; otherwise exporter-observed uptime.", []string{"uuid", "name", "model", "host", "source"}, nil)
 	infoDesc      = prometheus.NewDesc("sonos_speaker_info", "Static Sonos speaker info metric with software/model labels.", []string{"uuid", "name", "model", "host", "version", "model_number"}, nil)
@@ -140,6 +141,7 @@ func (e *sonosExporter) getSpeakers() []*speaker {
 func (e *sonosExporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- upDesc
 	ch <- volumeDesc
+	ch <- subLevelDesc
 	ch <- playingDesc
 	ch <- uptimeDesc
 	ch <- infoDesc
@@ -149,6 +151,7 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 	for _, sp := range e.getSpeakers() {
 		labelValues := []string{sp.UDN, sp.Name, sp.Model, sp.Host}
 		volume, errVol := e.getVolume(sp)
+		subLevel, errSub := e.getSubLevel(sp)
 		playing, errPlay := e.getPlaying(sp)
 		uptime, source := e.getUptime(sp)
 
@@ -163,6 +166,9 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 		if errVol == nil {
 			ch <- prometheus.MustNewConstMetric(volumeDesc, prometheus.GaugeValue, volume, labelValues...)
 		}
+		if errSub == nil {
+			ch <- prometheus.MustNewConstMetric(subLevelDesc, prometheus.GaugeValue, subLevel, labelValues...)
+		}
 		if errPlay == nil {
 			playVal := 0.0
 			if playing {
@@ -171,6 +177,18 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(playingDesc, prometheus.GaugeValue, playVal, labelValues...)
 		}
 	}
+}
+
+func (e *sonosExporter) getSubLevel(sp *speaker) (float64, error) {
+	resp, err := soapCall(sp.RenderingURL, "urn:schemas-upnp-org:service:RenderingControl:1", "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
+	if err != nil {
+		return 0, err
+	}
+	v := parseXMLTag(resp, "CurrentValue")
+	if v == "" {
+		return 0, errors.New("sub level not present")
+	}
+	return strconv.ParseFloat(v, 64)
 }
 
 func discoverSonos(timeout time.Duration) ([]*speaker, error) {
