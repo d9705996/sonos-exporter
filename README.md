@@ -53,9 +53,9 @@ scrape_configs:
 
 GitHub Actions workflow at `.github/workflows/ci-cd.yml` runs:
 
-- `go test ./...`
-- `golangci-lint`
-- PR comments for failing tests and lint issues (sticky PR comment for tests + reviewdog for lint)
+- `go-test-coverage` action (coverage checks + PR comments)
+- `golangci-lint` action
+- `golang-vulncheck` action
 - Docker image build on pull requests
 - Docker image build **and push** to GHCR on pushes to `main`
 

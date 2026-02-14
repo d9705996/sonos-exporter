@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   ci:
-    name: Test and lint
+    name: Test, lint, and vulncheck
     runs-on: ubuntu-latest
 
     steps:
@@ -25,55 +25,22 @@ jobs:
         with:
           go-version: "1.25.x"
 
-      - name: Run tests
-        id: go_test
-        shell: bash
-        run: |
-          set +e
-          go test ./... 2>&1 | tee /tmp/go-test.out
-          status=${PIPESTATUS[0]}
-          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
-          {
-            echo 'output<<EOF'
-            cat /tmp/go-test.out
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Comment test failures on PR
-        if: github.event_name == 'pull_request' && steps.go_test.outputs.exit_code != '0'
-        uses: marocchino/sticky-pull-request-comment@v2
+      - name: Go test coverage (PR comment + status)
+        uses: vladopajic/go-test-coverage@v2
         with:
-          header: go-test-failures
-          message: |
-            ## ❌ Go test failed
-
-            ```text
-            ${{ steps.go_test.outputs.output }}
-            ```
-
-      - name: Fail workflow when tests fail
-        if: steps.go_test.outputs.exit_code != '0'
-        run: |
-          echo "go test failed"
-          exit 1
+          git-token: ${{ secrets.GITHUB_TOKEN }}
+          package: ./...
 
       - name: Run golangci-lint
-        if: github.event_name != 'pull_request'
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
 
-      - name: Run golangci-lint with PR review comments
-        if: github.event_name == 'pull_request'
-        uses: reviewdog/action-golangci-lint@v2
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          reporter: github-pr-review
-          filter_mode: nofilter
-          fail_on_error: 'true'
-          golangci_lint_flags: '--timeout=5m'
-          golangci_lint_version: v1.64.8
+          go-package: ./...
+          go-version-input: "1.25.x"
 
   docker:
     name: Docker build and publish
