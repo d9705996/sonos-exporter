@@ -25,11 +25,14 @@ jobs:
         with:
           go-version: "1.25.x"
 
+      - name: Generate test coverage profile
+        run: go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
+
       - name: Go test coverage (PR comment + status)
         uses: vladopajic/go-test-coverage@v2
         with:
+          config: ./.testcoverage.yml
           git-token: ${{ secrets.GITHUB_TOKEN }}
-          package: ./...
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6

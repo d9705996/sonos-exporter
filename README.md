@@ -53,7 +53,7 @@ scrape_configs:
 
 GitHub Actions workflow at `.github/workflows/ci-cd.yml` runs:
 
-- `go-test-coverage` action (coverage checks + PR comments)
+- `go test` coverage profile generation (`cover.out`) + `go-test-coverage` action (coverage checks + PR comments)
 - `golangci-lint` action
 - `golang-vulncheck` action
 - Docker image build on pull requests
