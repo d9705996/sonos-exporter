@@ -86,7 +86,8 @@ scrape_configs:
 GitHub Actions workflows run as follows:
 
 - `.github/workflows/ci.yml` for lint/test/vuln checks
-- `.github/workflows/docker.yml` for Docker build/publish (only on push to `main`)
+- `.github/workflows/conventional-commits.yml` for enforcing conventional commit messages on PRs and `main`
+- `.github/workflows/docker.yml` for Docker build/publish (only on push to `main`), including automatic next SemVer calculation from conventional commits since the latest `vX.Y.Z` tag
 - `.github/workflows/dockerfile-lint.yml` for Dockerfile lint (runs only when `Dockerfile` changes)
 - `go test` coverage profile generation (`cover.out`) + `go-test-coverage` status check
 - `golangci-lint` (pinned CLI run in CI)
@@ -96,4 +97,4 @@ Published image:
 
 - `ghcr.io/<owner>/sonos-exporter:latest`
 - `ghcr.io/<owner>/sonos-exporter:sha-<commit>`
-- `ghcr.io/<owner>/sonos-exporter:<semver>` (when a matching `vX.Y.Z` tag exists in the repository)
+- `ghcr.io/<owner>/sonos-exporter:<semver>` (automatically computed from conventional commits since the latest `vX.Y.Z` tag, or from `0.0.0` when no tag exists)
