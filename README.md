@@ -56,10 +56,11 @@ GitHub Actions workflow at `.github/workflows/ci-cd.yml` runs:
 - `go test` coverage profile generation (`cover.out`) + `go-test-coverage` action (coverage checks + PR comments)
 - `golangci-lint` action
 - `golang-vulncheck` action
-- Docker image build on pull requests
-- Docker image build **and push** to GHCR on pushes to `main`
+- Dockerfile linting via `hadolint` runs only when `Dockerfile` changes
+- Docker image build/push to GHCR runs only on pushes to `main` (e.g., after PR merge)
 
 Published image:
 
 - `ghcr.io/<owner>/sonos-exporter:latest`
 - `ghcr.io/<owner>/sonos-exporter:sha-<commit>`
+- `ghcr.io/<owner>/sonos-exporter:<semver>` (when a matching `vX.Y.Z` tag exists in the repository)
