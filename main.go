@@ -198,7 +198,7 @@ func discoverSonos(timeout time.Duration) ([]*speaker, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	msg := strings.Join([]string{"M-SEARCH * HTTP/1.1", "HOST: 239.255.255.250:1900", "MAN: \"ssdp:discover\"", "MX: 1", "ST: " + sonosDeviceType, "", ""}, "\r\n")
 	dst, err := net.ResolveUDPAddr("udp4", ssdpAddr)
@@ -254,7 +254,7 @@ func speakerFromDescription(client *http.Client, location string) (*speaker, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("http status %s", resp.Status)
 	}
@@ -329,7 +329,7 @@ func (e *sonosExporter) getUptime(sp *speaker) (float64, string) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:1400/status/zp", sp.Host), nil)
 	resp, err := e.client.Do(req)
 	if err == nil {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode < 300 {
 			if body, err := io.ReadAll(resp.Body); err == nil {
 				var s zonePlayerStatus
@@ -366,7 +366,7 @@ func soapCall(controlURL, serviceURN, action string, args map[string]string, tim
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("soap %s status %s", action, resp.Status)
 	}
