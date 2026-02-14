@@ -109,7 +109,7 @@ func (e *sonosExporter) startDiscovery(ctx context.Context, interval, timeout ti
 }
 
 func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout time.Duration) {
-	ctx, span := e.tracer.Start(ctx, "discovery.refresh")
+	_, span := e.tracer.Start(ctx, "discovery.refresh")
 	defer span.End()
 	discovered, err := discoverSonos(discoveryTimeout)
 	if err != nil {

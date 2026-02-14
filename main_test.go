@@ -21,11 +21,11 @@ func TestCollectorExportsSpeakerMetrics(t *testing.T) {
 		_, _ = io.ReadAll(r.Body)
 		switch r.Header.Get("SOAPACTION") {
 		case `"urn:schemas-upnp-org:service:RenderingControl:1#GetVolume"`:
-			fmt.Fprint(w, `<CurrentVolume>22</CurrentVolume>`)
+			_, _ = fmt.Fprint(w, `<CurrentVolume>22</CurrentVolume>`)
 		case `"urn:schemas-upnp-org:service:RenderingControl:1#GetEQ"`:
-			fmt.Fprint(w, `<CurrentValue>5</CurrentValue>`)
+			_, _ = fmt.Fprint(w, `<CurrentValue>5</CurrentValue>`)
 		case `"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"`:
-			fmt.Fprint(w, `<CurrentTransportState>PLAYING</CurrentTransportState>`)
+			_, _ = fmt.Fprint(w, `<CurrentTransportState>PLAYING</CurrentTransportState>`)
 		default:
 			http.Error(w, "unexpected soap action", http.StatusBadRequest)
 		}
@@ -89,11 +89,11 @@ func TestCollectorSkipsSubLevelMetricWhenUnavailable(t *testing.T) {
 		_, _ = io.ReadAll(r.Body)
 		switch r.Header.Get("SOAPACTION") {
 		case `"urn:schemas-upnp-org:service:RenderingControl:1#GetVolume"`:
-			fmt.Fprint(w, `<CurrentVolume>22</CurrentVolume>`)
+			_, _ = fmt.Fprint(w, `<CurrentVolume>22</CurrentVolume>`)
 		case `"urn:schemas-upnp-org:service:RenderingControl:1#GetEQ"`:
-			fmt.Fprint(w, `<NoSubValue>true</NoSubValue>`)
+			_, _ = fmt.Fprint(w, `<NoSubValue>true</NoSubValue>`)
 		case `"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"`:
-			fmt.Fprint(w, `<CurrentTransportState>STOPPED</CurrentTransportState>`)
+			_, _ = fmt.Fprint(w, `<CurrentTransportState>STOPPED</CurrentTransportState>`)
 		default:
 			http.Error(w, "unexpected soap action", http.StatusBadRequest)
 		}
