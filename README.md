@@ -89,6 +89,7 @@ GitHub Actions workflows run as follows:
 - `.github/workflows/conventional-commits.yml` for enforcing conventional commit messages on PRs and `main`
 - `.github/workflows/docker.yml` for Docker build/publish (only on push to `main`), including automatic next SemVer calculation from conventional commits since the latest `vX.Y.Z` tag
 - `.github/workflows/dockerfile-lint.yml` for Dockerfile lint (runs only when `Dockerfile` changes)
+- `.github/workflows/conventional-commits.yml` for Conventional Commits validation on pull requests
 - `go test` coverage profile generation (`cover.out`) + `go-test-coverage` status check
 - `golangci-lint` (pinned CLI run in CI)
 - `golang-vulncheck` action

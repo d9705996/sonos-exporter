@@ -2,17 +2,18 @@ name: Conventional Commits
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   commitlint:
-    name: Enforce conventional commits
+    name: Validate commit messages
     runs-on: ubuntu-latest
 
     steps:
@@ -23,5 +24,3 @@ jobs:
 
       - name: Lint commit messages
         uses: wagoid/commitlint-github-action@v6
-        with:
-          configFile: .commitlintrc.cjs
