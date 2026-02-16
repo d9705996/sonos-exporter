@@ -43,6 +43,8 @@ const (
 	avTransportService       = "urn:schemas-upnp-org:service:AVTransport:1"
 )
 
+var errNoAVTransport = errors.New("speaker does not expose AVTransport (satellite/sub)")
+
 type sonosExporter struct {
 	client     *http.Client
 	logger     *slog.Logger
@@ -80,21 +82,32 @@ type speaker struct {
 	LastSeen       time.Time
 }
 
+type upnpService struct {
+	ServiceType string `xml:"serviceType"`
+	ControlURL  string `xml:"controlURL"`
+}
+
+type upnpDevice struct {
+	FriendlyName string `xml:"friendlyName"`
+	ModelName    string `xml:"modelName"`
+	ModelNumber  string `xml:"modelNumber"`
+	Version      string `xml:"softwareVersion"`
+	UDN          string `xml:"UDN"`
+	ServiceList  struct {
+		Services []upnpService `xml:"service"`
+	} `xml:"serviceList"`
+	DeviceList struct {
+		Devices []struct {
+			ServiceList struct {
+				Services []upnpService `xml:"service"`
+			} `xml:"serviceList"`
+		} `xml:"device"`
+	} `xml:"deviceList"`
+}
+
 type deviceDescription struct {
-	Device struct {
-		FriendlyName string `xml:"friendlyName"`
-		ModelName    string `xml:"modelName"`
-		ModelNumber  string `xml:"modelNumber"`
-		Version      string `xml:"softwareVersion"`
-		UDN          string `xml:"UDN"`
-		ServiceList  struct {
-			Services []struct {
-				ServiceType string `xml:"serviceType"`
-				ControlURL  string `xml:"controlURL"`
-			} `xml:"service"`
-		} `xml:"serviceList"`
-	} `xml:"device"`
-	URLBase string `xml:"URLBase"`
+	Device  upnpDevice `xml:"device"`
+	URLBase string     `xml:"URLBase"`
 }
 
 type zonePlayerStatus struct {
@@ -325,7 +338,7 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 		labelValues := []string{sp.UDN, sp.Name, sp.Model, sp.Host}
 
 		up := 1.0
-		if m.errVol != nil && m.errPlay != nil {
+		if m.errVol != nil && (m.errPlay != nil && !errors.Is(m.errPlay, errNoAVTransport)) {
 			up = 0
 		}
 		ch <- prometheus.MustNewConstMetric(upDesc, prometheus.GaugeValue, up, labelValues...)
@@ -438,6 +451,9 @@ func (e *sonosExporter) getLoudness(ctx context.Context, sp *speaker) (bool, err
 func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, error) {
 	_, span := e.tracer.Start(ctx, "speaker.get_play_mode")
 	defer span.End()
+	if sp.AVTransportURL == "" {
+		return "", errNoAVTransport
+	}
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportSettings", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		span.RecordError(err)
@@ -454,6 +470,9 @@ func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, e
 func (e *sonosExporter) getPositionSnapshot(ctx context.Context, sp *speaker) (positionSnapshot, error) {
 	_, span := e.tracer.Start(ctx, "speaker.get_position_info")
 	defer span.End()
+	if sp.AVTransportURL == "" {
+		return positionSnapshot{}, errNoAVTransport
+	}
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		span.RecordError(err)
@@ -633,8 +652,15 @@ func speakerFromDescription(client *http.Client, location string) (*speaker, err
 		baseURL = fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 	}
 
+	// Collect services from the top-level device and all nested sub-devices
+	// (Sonos puts RenderingControl/AVTransport inside MediaRenderer/MediaServer sub-devices).
+	allServices := append([]upnpService{}, desc.Device.ServiceList.Services...)
+	for _, sub := range desc.Device.DeviceList.Devices {
+		allServices = append(allServices, sub.ServiceList.Services...)
+	}
+
 	var renderingURL, avTransportURL string
-	for _, svc := range desc.Device.ServiceList.Services {
+	for _, svc := range allServices {
 		switch svc.ServiceType {
 		case renderingControlService:
 			renderingURL = resolveURL(baseURL, svc.ControlURL)
@@ -642,8 +668,9 @@ func speakerFromDescription(client *http.Client, location string) (*speaker, err
 			avTransportURL = resolveURL(baseURL, svc.ControlURL)
 		}
 	}
-	if renderingURL == "" || avTransportURL == "" {
-		return nil, errors.New("required services missing")
+	if renderingURL == "" {
+		return nil, fmt.Errorf("RenderingControl service not found (found %d services across device + %d sub-devices)",
+			len(desc.Device.ServiceList.Services), len(desc.Device.DeviceList.Devices))
 	}
 	host := ""
 	if u, err := url.Parse(baseURL); err == nil {
@@ -689,6 +716,9 @@ func (e *sonosExporter) getVolume(ctx context.Context, sp *speaker) (float64, er
 func (e *sonosExporter) getPlaying(ctx context.Context, sp *speaker) (bool, error) {
 	_, span := e.tracer.Start(ctx, "speaker.get_playing")
 	defer span.End()
+	if sp.AVTransportURL == "" {
+		return false, errNoAVTransport
+	}
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		span.RecordError(err)

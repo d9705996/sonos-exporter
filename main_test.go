@@ -853,6 +853,110 @@ func TestLogNetworkInterfaces(t *testing.T) {
 	logNetworkInterfaces(slog.Default())
 }
 
+func TestSpeakerFromDescriptionNestedDeviceList(t *testing.T) {
+	t.Parallel()
+	// Real Sonos XML structure: RenderingControl and AVTransport live inside
+	// nested sub-devices (MediaRenderer), not in the top-level serviceList.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <URLBase>http://`+r.Host+`</URLBase>
+  <device>
+    <friendlyName>192.168.0.152 - Sonos Play:1</friendlyName>
+    <modelName>Sonos Play:1</modelName>
+    <modelNumber>S1</modelNumber>
+    <softwareVersion>86.4-73290</softwareVersion>
+    <UDN>uuid:RINCON_B8E93788C13601400</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AlarmClock:1</serviceType>
+        <controlURL>/AlarmClock/Control</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:DeviceProperties:1</serviceType>
+        <controlURL>/DeviceProperties/Control</controlURL>
+      </service>
+    </serviceList>
+    <deviceList>
+      <device>
+        <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+            <controlURL>/MediaRenderer/RenderingControl/Control</controlURL>
+          </service>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+            <controlURL>/MediaRenderer/AVTransport/Control</controlURL>
+          </service>
+        </serviceList>
+      </device>
+    </deviceList>
+  </device>
+</root>`)
+	}))
+	defer srv.Close()
+
+	sp, err := speakerFromDescription(srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatalf("speakerFromDescription failed on nested device XML: %v", err)
+	}
+	if sp.UDN != "uuid:RINCON_B8E93788C13601400" {
+		t.Errorf("unexpected UDN: %q", sp.UDN)
+	}
+	if sp.RenderingURL == "" {
+		t.Error("expected RenderingURL to be resolved from nested MediaRenderer device")
+	}
+	if sp.AVTransportURL == "" {
+		t.Error("expected AVTransportURL to be resolved from nested MediaRenderer device")
+	}
+	if !strings.Contains(sp.RenderingURL, "/MediaRenderer/RenderingControl/Control") {
+		t.Errorf("unexpected RenderingURL: %q", sp.RenderingURL)
+	}
+}
+
+func TestSpeakerFromDescriptionNoAVTransport(t *testing.T) {
+	t.Parallel()
+	// A satellite/sub speaker may only expose RenderingControl without AVTransport.
+	// It should still be accepted (AVTransportURL will be empty).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `<?xml version="1.0"?>
+<root>
+  <URLBase>http://`+r.Host+`</URLBase>
+  <device>
+    <friendlyName>Sub</friendlyName>
+    <modelName>Sonos Sub</modelName>
+    <modelNumber>Sub</modelNumber>
+    <softwareVersion>16.0</softwareVersion>
+    <UDN>uuid:sub1</UDN>
+    <serviceList></serviceList>
+    <deviceList>
+      <device>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+            <controlURL>/MediaRenderer/RenderingControl/Control</controlURL>
+          </service>
+        </serviceList>
+      </device>
+    </deviceList>
+  </device>
+</root>`)
+	}))
+	defer srv.Close()
+
+	sp, err := speakerFromDescription(srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatalf("expected speaker without AVTransport to be accepted: %v", err)
+	}
+	if sp.AVTransportURL != "" {
+		t.Errorf("expected empty AVTransportURL, got %q", sp.AVTransportURL)
+	}
+	if sp.RenderingURL == "" {
+		t.Error("expected non-empty RenderingURL")
+	}
+}
+
 func TestInitTelemetryNoEndpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
