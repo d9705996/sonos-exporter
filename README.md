@@ -50,6 +50,17 @@ Flags:
 - `-sonos.speaker-stale-after` (default `10m`, set `0` to keep speakers indefinitely even if offline)
 - `-sonos.static-targets` (comma-separated list of speaker IPs/hostnames, bypasses SSDP - **recommended for Docker**)
 
+Environment variables:
+
+- `SONOS_EXPORTER_WEB_LISTEN_ADDRESS` (equivalent to `-web.listen-address`)
+- `SONOS_EXPORTER_WEB_TELEMETRY_PATH` (equivalent to `-web.telemetry-path`)
+- `SONOS_EXPORTER_SONOS_DISCOVERY_INTERVAL` (equivalent to `-sonos.discovery-interval`)
+- `SONOS_EXPORTER_SONOS_DISCOVERY_TIMEOUT` (equivalent to `-sonos.discovery-timeout`)
+- `SONOS_EXPORTER_SONOS_SPEAKER_STALE_AFTER` (equivalent to `-sonos.speaker-stale-after`)
+- `SONOS_EXPORTER_SONOS_STATIC_TARGETS` (equivalent to `-sonos.static-targets`)
+
+Flags still work as before and take precedence over env vars when both are set.
+
 
 ## OpenTelemetry
 
