@@ -1,0 +1,11 @@
+# Build outputs
+sonos-exporter
+*.exe
+
+# Test artifacts
+cover.out
+*.test
+
+# IDE
+.vscode/
+.idea/

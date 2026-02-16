@@ -14,9 +14,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,6 +36,7 @@ const (
 	defaultSpeakerStaleAfter = 10 * time.Minute
 	deviceReqTimeout         = 4 * time.Second
 	soapTimeout              = 3 * time.Second
+	maxResponseBytes         = 1 << 20 // 1 MiB safety limit for HTTP response bodies
 	renderingControlService  = "urn:schemas-upnp-org:service:RenderingControl:1"
 	avTransportService       = "urn:schemas-upnp-org:service:AVTransport:1"
 )
@@ -69,6 +73,7 @@ type speaker struct {
 	ModelNumber    string
 	RenderingURL   string
 	AVTransportURL string
+	StatusURL      string
 	FirstSeen      time.Time
 	LastSeen       time.Time
 }
@@ -130,8 +135,6 @@ func newSonosExporterWithOptions(logger *slog.Logger, staleAfter time.Duration) 
 }
 
 func (e *sonosExporter) startDiscovery(ctx context.Context, interval, timeout time.Duration) {
-	ctx, span := e.tracer.Start(ctx, "discovery.loop")
-	defer span.End()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	e.refreshSpeakers(ctx, timeout)
@@ -167,6 +170,7 @@ func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout ti
 			existing.Host = sp.Host
 			existing.RenderingURL = sp.RenderingURL
 			existing.AVTransportURL = sp.AVTransportURL
+			existing.StatusURL = sp.StatusURL
 			existing.LastSeen = now
 			continue
 		}
@@ -227,72 +231,110 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 	speakers := e.getSpeakers()
 	ch <- prometheus.MustNewConstMetric(discoveredTotalDesc, prometheus.GaugeValue, float64(len(speakers)))
 	now := time.Now()
-	for _, sp := range speakers {
-		ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect")
+
+	type speakerMetrics struct {
+		sp          *speaker
+		volume      float64
+		subLevel    float64
+		mute        bool
+		bass        float64
+		treble      float64
+		loudness    bool
+		playing     bool
+		playMode    string
+		posSnap     positionSnapshot
+		uptime      float64
+		source      string
+		errVol      error
+		errSub      error
+		errMute     error
+		errBass     error
+		errTreble   error
+		errLoudness error
+		errPlay     error
+		errPlayMode error
+		errPosition error
+	}
+
+	results := make([]speakerMetrics, len(speakers))
+	var wg sync.WaitGroup
+	for i, sp := range speakers {
+		wg.Add(1)
+		go func(idx int, sp *speaker) {
+			defer wg.Done()
+			ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect")
+			defer span.End()
+			m := &results[idx]
+			m.sp = sp
+			m.volume, m.errVol = e.getVolume(ctxSpeaker, sp)
+			m.subLevel, m.errSub = e.getSubLevel(ctxSpeaker, sp)
+			m.mute, m.errMute = e.getMute(ctxSpeaker, sp)
+			m.bass, m.errBass = e.getBass(ctxSpeaker, sp)
+			m.treble, m.errTreble = e.getTreble(ctxSpeaker, sp)
+			m.loudness, m.errLoudness = e.getLoudness(ctxSpeaker, sp)
+			m.playing, m.errPlay = e.getPlaying(ctxSpeaker, sp)
+			m.playMode, m.errPlayMode = e.getPlayMode(ctxSpeaker, sp)
+			m.posSnap, m.errPosition = e.getPositionSnapshot(ctxSpeaker, sp)
+			m.uptime, m.source = e.getUptime(ctxSpeaker, sp)
+		}(i, sp)
+	}
+	wg.Wait()
+
+	for _, m := range results {
+		sp := m.sp
 		labelValues := []string{sp.UDN, sp.Name, sp.Model, sp.Host}
-		volume, errVol := e.getVolume(ctxSpeaker, sp)
-		subLevel, errSub := e.getSubLevel(ctxSpeaker, sp)
-		mute, errMute := e.getMute(ctxSpeaker, sp)
-		bass, errBass := e.getBass(ctxSpeaker, sp)
-		treble, errTreble := e.getTreble(ctxSpeaker, sp)
-		loudness, errLoudness := e.getLoudness(ctxSpeaker, sp)
-		playing, errPlay := e.getPlaying(ctxSpeaker, sp)
-		playMode, errPlayMode := e.getPlayMode(ctxSpeaker, sp)
-		positionSnapshot, errPosition := e.getPositionSnapshot(ctxSpeaker, sp)
-		uptime, source := e.getUptime(ctxSpeaker, sp)
 
 		up := 1.0
-		if errVol != nil && errPlay != nil {
+		if m.errVol != nil && m.errPlay != nil {
 			up = 0
 		}
 		ch <- prometheus.MustNewConstMetric(upDesc, prometheus.GaugeValue, up, labelValues...)
 		ch <- prometheus.MustNewConstMetric(infoDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, sp.Version, sp.ModelNumber)
-		ch <- prometheus.MustNewConstMetric(uptimeDesc, prometheus.GaugeValue, uptime, sp.UDN, sp.Name, sp.Model, sp.Host, source)
+		ch <- prometheus.MustNewConstMetric(uptimeDesc, prometheus.GaugeValue, m.uptime, sp.UDN, sp.Name, sp.Model, sp.Host, m.source)
 		ch <- prometheus.MustNewConstMetric(lastSeenDesc, prometheus.GaugeValue, float64(sp.LastSeen.Unix()), labelValues...)
 		ch <- prometheus.MustNewConstMetric(discoveryAgeDesc, prometheus.GaugeValue, now.Sub(sp.LastSeen).Seconds(), labelValues...)
 
-		if errVol == nil {
-			ch <- prometheus.MustNewConstMetric(volumeDesc, prometheus.GaugeValue, volume, labelValues...)
+		if m.errVol == nil {
+			ch <- prometheus.MustNewConstMetric(volumeDesc, prometheus.GaugeValue, m.volume, labelValues...)
 		}
-		if errSub == nil {
-			ch <- prometheus.MustNewConstMetric(subLevelDesc, prometheus.GaugeValue, subLevel, labelValues...)
+		if m.errSub == nil {
+			ch <- prometheus.MustNewConstMetric(subLevelDesc, prometheus.GaugeValue, m.subLevel, labelValues...)
 		}
-		if errMute == nil {
-			ch <- prometheus.MustNewConstMetric(muteDesc, prometheus.GaugeValue, boolToFloat(mute), labelValues...)
+		if m.errMute == nil {
+			ch <- prometheus.MustNewConstMetric(muteDesc, prometheus.GaugeValue, boolToFloat(m.mute), labelValues...)
 		}
-		if errBass == nil {
-			ch <- prometheus.MustNewConstMetric(bassDesc, prometheus.GaugeValue, bass, labelValues...)
+		if m.errBass == nil {
+			ch <- prometheus.MustNewConstMetric(bassDesc, prometheus.GaugeValue, m.bass, labelValues...)
 		}
-		if errTreble == nil {
-			ch <- prometheus.MustNewConstMetric(trebleDesc, prometheus.GaugeValue, treble, labelValues...)
+		if m.errTreble == nil {
+			ch <- prometheus.MustNewConstMetric(trebleDesc, prometheus.GaugeValue, m.treble, labelValues...)
 		}
-		if errLoudness == nil {
-			ch <- prometheus.MustNewConstMetric(loudnessDesc, prometheus.GaugeValue, boolToFloat(loudness), labelValues...)
+		if m.errLoudness == nil {
+			ch <- prometheus.MustNewConstMetric(loudnessDesc, prometheus.GaugeValue, boolToFloat(m.loudness), labelValues...)
 		}
-		if errPlay == nil {
-			ch <- prometheus.MustNewConstMetric(playingDesc, prometheus.GaugeValue, boolToFloat(playing), labelValues...)
+		if m.errPlay == nil {
+			ch <- prometheus.MustNewConstMetric(playingDesc, prometheus.GaugeValue, boolToFloat(m.playing), labelValues...)
 		}
-		if errPlayMode == nil {
-			ch <- prometheus.MustNewConstMetric(playModeDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, playMode)
+		if m.errPlayMode == nil {
+			ch <- prometheus.MustNewConstMetric(playModeDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, m.playMode)
 		}
-		if errPosition == nil {
-			if positionSnapshot.Position >= 0 && positionSnapshot.Duration >= 0 {
-				ch <- prometheus.MustNewConstMetric(trackPositionDesc, prometheus.GaugeValue, positionSnapshot.Position, labelValues...)
-				ch <- prometheus.MustNewConstMetric(trackDurationDesc, prometheus.GaugeValue, positionSnapshot.Duration, labelValues...)
+		if m.errPosition == nil {
+			if m.posSnap.Position >= 0 && m.posSnap.Duration >= 0 {
+				ch <- prometheus.MustNewConstMetric(trackPositionDesc, prometheus.GaugeValue, m.posSnap.Position, labelValues...)
+				ch <- prometheus.MustNewConstMetric(trackDurationDesc, prometheus.GaugeValue, m.posSnap.Duration, labelValues...)
 			}
-			if positionSnapshot.Title != "" || positionSnapshot.Artist != "" || positionSnapshot.Album != "" || positionSnapshot.URI != "" {
-				ch <- prometheus.MustNewConstMetric(nowPlayingDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, positionSnapshot.Title, positionSnapshot.Artist, positionSnapshot.Album, positionSnapshot.URI)
-				e.logNowPlayingChange(sp, positionSnapshot.nowPlayingInfo)
+			if m.posSnap.Title != "" || m.posSnap.Artist != "" || m.posSnap.Album != "" || m.posSnap.URI != "" {
+				ch <- prometheus.MustNewConstMetric(nowPlayingDesc, prometheus.GaugeValue, 1, sp.UDN, sp.Name, sp.Model, sp.Host, m.posSnap.Title, m.posSnap.Artist, m.posSnap.Album, m.posSnap.URI)
+				e.logNowPlayingChange(sp, m.posSnap.nowPlayingInfo)
 			}
 		}
-		span.End()
 	}
 }
 
 func (e *sonosExporter) getSubLevel(ctx context.Context, sp *speaker) (float64, error) {
 	_, span := e.tracer.Start(ctx, "speaker.get_sub_level")
 	defer span.End()
-	resp, err := soapCall(ctx, sp.RenderingURL, renderingControlService, "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
+	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -304,7 +346,9 @@ func (e *sonosExporter) getSubLevel(ctx context.Context, sp *speaker) (float64, 
 }
 
 func (e *sonosExporter) getMute(ctx context.Context, sp *speaker) (bool, error) {
-	resp, err := soapCall(ctx, sp.RenderingURL, renderingControlService, "GetMute", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
+	_, span := e.tracer.Start(ctx, "speaker.get_mute")
+	defer span.End()
+	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetMute", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -312,7 +356,9 @@ func (e *sonosExporter) getMute(ctx context.Context, sp *speaker) (bool, error) 
 }
 
 func (e *sonosExporter) getBass(ctx context.Context, sp *speaker) (float64, error) {
-	resp, err := soapCall(ctx, sp.RenderingURL, renderingControlService, "GetBass", map[string]string{"InstanceID": "0"}, soapTimeout)
+	_, span := e.tracer.Start(ctx, "speaker.get_bass")
+	defer span.End()
+	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetBass", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -320,7 +366,9 @@ func (e *sonosExporter) getBass(ctx context.Context, sp *speaker) (float64, erro
 }
 
 func (e *sonosExporter) getTreble(ctx context.Context, sp *speaker) (float64, error) {
-	resp, err := soapCall(ctx, sp.RenderingURL, renderingControlService, "GetTreble", map[string]string{"InstanceID": "0"}, soapTimeout)
+	_, span := e.tracer.Start(ctx, "speaker.get_treble")
+	defer span.End()
+	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetTreble", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -328,7 +376,9 @@ func (e *sonosExporter) getTreble(ctx context.Context, sp *speaker) (float64, er
 }
 
 func (e *sonosExporter) getLoudness(ctx context.Context, sp *speaker) (bool, error) {
-	resp, err := soapCall(ctx, sp.RenderingURL, renderingControlService, "GetLoudness", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
+	_, span := e.tracer.Start(ctx, "speaker.get_loudness")
+	defer span.End()
+	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetLoudness", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -336,7 +386,9 @@ func (e *sonosExporter) getLoudness(ctx context.Context, sp *speaker) (bool, err
 }
 
 func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, error) {
-	resp, err := soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportSettings", map[string]string{"InstanceID": "0"}, soapTimeout)
+	_, span := e.tracer.Start(ctx, "speaker.get_play_mode")
+	defer span.End()
+	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportSettings", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		return "", err
 	}
@@ -348,7 +400,9 @@ func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, e
 }
 
 func (e *sonosExporter) getPositionSnapshot(ctx context.Context, sp *speaker) (positionSnapshot, error) {
-	resp, err := soapCall(ctx, sp.AVTransportURL, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
+	_, span := e.tracer.Start(ctx, "speaker.get_position_info")
+	defer span.End()
+	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		return positionSnapshot{}, err
 	}
@@ -402,8 +456,8 @@ func discoverSonos(timeout time.Duration) ([]*speaker, error) {
 	client := &http.Client{Timeout: deviceReqTimeout}
 	seen := map[string]struct{}{}
 	var speakers []*speaker
+	buf := make([]byte, 65535)
 	for {
-		buf := make([]byte, 65535)
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
 			if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
@@ -447,7 +501,7 @@ func speakerFromDescription(client *http.Client, location string) (*speaker, err
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("http status %s", resp.Status)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +534,17 @@ func speakerFromDescription(client *http.Client, location string) (*speaker, err
 	if u, err := url.Parse(baseURL); err == nil {
 		host = u.Hostname()
 	}
-	return &speaker{UDN: desc.Device.UDN, Name: desc.Device.FriendlyName, Model: desc.Device.ModelName, Version: desc.Device.Version, ModelNumber: desc.Device.ModelNumber, Host: host, RenderingURL: renderingURL, AVTransportURL: avTransportURL}, nil
+	return &speaker{
+		UDN:            desc.Device.UDN,
+		Name:           desc.Device.FriendlyName,
+		Model:          desc.Device.ModelName,
+		Version:        desc.Device.Version,
+		ModelNumber:    desc.Device.ModelNumber,
+		Host:           host,
+		RenderingURL:   renderingURL,
+		AVTransportURL: avTransportURL,
+		StatusURL:      fmt.Sprintf("%s/status/zp", strings.TrimRight(baseURL, "/")),
+	}, nil
 }
 
 func resolveURL(baseURL, p string) string {
@@ -498,7 +562,7 @@ func resolveURL(baseURL, p string) string {
 func (e *sonosExporter) getVolume(ctx context.Context, sp *speaker) (float64, error) {
 	_, span := e.tracer.Start(ctx, "speaker.get_volume")
 	defer span.End()
-	resp, err := soapCall(ctx, sp.RenderingURL, renderingControlService, "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
+	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -508,7 +572,7 @@ func (e *sonosExporter) getVolume(ctx context.Context, sp *speaker) (float64, er
 func (e *sonosExporter) getPlaying(ctx context.Context, sp *speaker) (bool, error) {
 	_, span := e.tracer.Start(ctx, "speaker.get_playing")
 	defer span.End()
-	resp, err := soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
+	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -521,12 +585,12 @@ func (e *sonosExporter) getUptime(ctx context.Context, sp *speaker) (float64, st
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, soapTimeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:1400/status/zp", sp.Host), nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, sp.StatusURL, nil)
 	resp, err := e.client.Do(req)
 	if err == nil {
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode < 300 {
-			if body, err := io.ReadAll(resp.Body); err == nil {
+			if body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes)); err == nil {
 				var s zonePlayerStatus
 				if xml.Unmarshal(body, &s) == nil {
 					if d := parseDurationString(s.Uptime); d > 0 {
@@ -539,7 +603,7 @@ func (e *sonosExporter) getUptime(ctx context.Context, sp *speaker) (float64, st
 	return time.Since(sp.FirstSeen).Seconds(), "observed"
 }
 
-func soapCall(parent context.Context, controlURL, serviceURN, action string, args map[string]string, timeout time.Duration) (string, error) {
+func (e *sonosExporter) soapCall(parent context.Context, controlURL, serviceURN, action string, args map[string]string, timeout time.Duration) (string, error) {
 	var body bytes.Buffer
 	body.WriteString(`<?xml version="1.0" encoding="utf-8"?>`)
 	body.WriteString(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>`)
@@ -557,7 +621,7 @@ func soapCall(parent context.Context, controlURL, serviceURN, action string, arg
 	}
 	req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
 	req.Header.Set("SOAPACTION", fmt.Sprintf(`"%s#%s"`, serviceURN, action))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -565,7 +629,7 @@ func soapCall(parent context.Context, controlURL, serviceURN, action string, arg
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("soap %s status %s", action, resp.Status)
 	}
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return "", err
 	}
@@ -614,7 +678,7 @@ func main() {
 	otelInsecure := flag.Bool("otel.exporter.otlp.insecure", true, "Use insecure OTLP gRPC connection")
 	flag.Parse()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := fallbackLogger()
 	if *otelEndpoint != "" {
@@ -650,8 +714,20 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "<html><head><title>Sonos Exporter</title></head><body><h1>Sonos Exporter</h1><p><a href='%s'>Metrics</a></p></body></html>", *metricsPath)
 	})
+
+	srv := &http.Server{Addr: *listenAddr}
+	go func() {
+		<-ctx.Done()
+		logger.Info("shutting down http server")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("http server shutdown error", "error", err)
+		}
+	}()
+
 	logger.Info("starting sonos_exporter", "listen_address", *listenAddr, "metrics_path", *metricsPath)
-	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("http server exited", "error", err)
 	}
 }

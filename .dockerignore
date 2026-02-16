@@ -1,2 +1,7 @@
 .git
 .github
+*.md
+cover.out
+sonos-exporter
+.testcoverage.yml
+.commitlintrc.cjs
