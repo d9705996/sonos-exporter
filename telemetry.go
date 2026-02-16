@@ -9,7 +9,6 @@ import (
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otelglobal "go.opentelemetry.io/otel/log/global"
@@ -17,32 +16,27 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 )
 
-func initTelemetry(ctx context.Context, serviceName, endpoint string, insecure bool) (func(context.Context) error, *slog.Logger, error) {
+func initTelemetry(ctx context.Context) (func(context.Context) error, *slog.Logger, error) {
+	// Resource: defaults are overridden by OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES env vars.
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName(serviceName),
-			attribute.String("service.version", "dev"),
+			semconv.ServiceName("sonos-exporter"),
+			semconv.ServiceVersion("dev"),
 		),
+		resource.WithFromEnv(),
+		resource.WithTelemetrySDK(),
+		resource.WithHost(),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create resource: %w", err)
 	}
 
-	traceOpts := []otlptracegrpc.Option{}
-	logOpts := []otlploggrpc.Option{}
-	if endpoint != "" {
-		traceOpts = append(traceOpts, otlptracegrpc.WithEndpoint(endpoint))
-		logOpts = append(logOpts, otlploggrpc.WithEndpoint(endpoint))
-	}
-	if insecure {
-		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
-		logOpts = append(logOpts, otlploggrpc.WithInsecure())
-	}
-
-	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
+	// Exporters read OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_INSECURE,
+	// OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_TIMEOUT, etc. automatically.
+	traceExporter, err := otlptracegrpc.New(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create trace exporter: %w", err)
 	}
@@ -53,7 +47,7 @@ func initTelemetry(ctx context.Context, serviceName, endpoint string, insecure b
 	otel.SetTracerProvider(traceProvider)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	logExporter, err := otlploggrpc.New(ctx, logOpts...)
+	logExporter, err := otlploggrpc.New(ctx)
 	if err != nil {
 		_ = traceProvider.Shutdown(ctx)
 		return nil, nil, fmt.Errorf("create log exporter: %w", err)

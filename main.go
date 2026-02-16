@@ -25,6 +25,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -134,28 +136,58 @@ func newSonosExporterWithOptions(logger *slog.Logger, staleAfter time.Duration) 
 	}
 }
 
-func (e *sonosExporter) startDiscovery(ctx context.Context, interval, timeout time.Duration) {
+func (e *sonosExporter) startDiscovery(ctx context.Context, interval, timeout time.Duration, staticTargets []string) {
+	e.logger.Info("discovery loop starting",
+		"interval", interval.String(),
+		"timeout", timeout.String(),
+		"static_targets", len(staticTargets),
+	)
+	logNetworkInterfaces(e.logger)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	e.refreshSpeakers(ctx, timeout)
+	e.refreshSpeakers(ctx, timeout, staticTargets)
 	for {
 		select {
 		case <-ctx.Done():
+			e.logger.Info("discovery loop stopped")
 			return
 		case <-ticker.C:
-			e.refreshSpeakers(ctx, timeout)
+			e.refreshSpeakers(ctx, timeout, staticTargets)
 		}
 	}
 }
 
-func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout time.Duration) {
+func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout time.Duration, staticTargets []string) {
 	_, span := e.tracer.Start(ctx, "discovery.refresh")
 	defer span.End()
-	discovered, err := discoverSonos(discoveryTimeout)
+
+	var discovered []*speaker
+
+	// SSDP multicast discovery
+	e.logger.Info("ssdp discovery starting", "timeout", discoveryTimeout.String())
+	ssdpSpeakers, err := discoverSonos(e.logger, discoveryTimeout)
 	if err != nil {
-		e.logger.Error("discovery error", "error", err)
-		return
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "ssdp discovery failed")
+		e.logger.Error("ssdp discovery failed", "error", err)
+	} else {
+		e.logger.Info("ssdp discovery complete", "found", len(ssdpSpeakers))
+		discovered = append(discovered, ssdpSpeakers...)
 	}
+
+	// Static target discovery
+	if len(staticTargets) > 0 {
+		e.logger.Info("static target discovery starting", "targets", len(staticTargets))
+		staticSpeakers := e.fetchStaticSpeakers(staticTargets)
+		e.logger.Info("static target discovery complete", "found", len(staticSpeakers), "targets", len(staticTargets))
+		discovered = append(discovered, staticSpeakers...)
+	}
+
+	if len(discovered) == 0 {
+		e.logger.Warn("no speakers discovered from any source",
+			"hint", "if running in Docker, use --network=host or set -sonos.static-targets")
+	}
+
 	now := time.Now()
 	discoveredNow := make(map[string]struct{}, len(discovered))
 	e.speakersMu.Lock()
@@ -172,11 +204,13 @@ func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout ti
 			existing.AVTransportURL = sp.AVTransportURL
 			existing.StatusURL = sp.StatusURL
 			existing.LastSeen = now
+			e.logger.Debug("speaker updated", "udn", sp.UDN, "name", sp.Name, "host", sp.Host)
 			continue
 		}
 		sp.FirstSeen = now
 		sp.LastSeen = now
 		e.speakers[sp.UDN] = sp
+		e.logger.Info("speaker discovered", "udn", sp.UDN, "name", sp.Name, "model", sp.Model, "host", sp.Host)
 	}
 	e.evictStaleLocked(now, discoveredNow)
 }
@@ -262,7 +296,13 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 		wg.Add(1)
 		go func(idx int, sp *speaker) {
 			defer wg.Done()
-			ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect")
+			ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect",
+				trace.WithAttributes(
+					attribute.String("sonos.speaker.name", sp.Name),
+					attribute.String("sonos.speaker.udn", sp.UDN),
+					attribute.String("sonos.speaker.host", sp.Host),
+				),
+			)
 			defer span.End()
 			m := &results[idx]
 			m.sp = sp
@@ -336,6 +376,8 @@ func (e *sonosExporter) getSubLevel(ctx context.Context, sp *speaker) (float64, 
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetEQ failed")
 		return 0, err
 	}
 	v := parseXMLTag(resp, "CurrentValue")
@@ -350,6 +392,8 @@ func (e *sonosExporter) getMute(ctx context.Context, sp *speaker) (bool, error) 
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetMute", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetMute failed")
 		return false, err
 	}
 	return parseXMLTag(resp, "CurrentMute") == "1", nil
@@ -360,6 +404,8 @@ func (e *sonosExporter) getBass(ctx context.Context, sp *speaker) (float64, erro
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetBass", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetBass failed")
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentBass"), 64)
@@ -370,6 +416,8 @@ func (e *sonosExporter) getTreble(ctx context.Context, sp *speaker) (float64, er
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetTreble", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetTreble failed")
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentTreble"), 64)
@@ -380,6 +428,8 @@ func (e *sonosExporter) getLoudness(ctx context.Context, sp *speaker) (bool, err
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetLoudness", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetLoudness failed")
 		return false, err
 	}
 	return parseXMLTag(resp, "CurrentLoudness") == "1", nil
@@ -390,6 +440,8 @@ func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, e
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportSettings", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetTransportSettings failed")
 		return "", err
 	}
 	mode := strings.TrimSpace(parseXMLTag(resp, "PlayMode"))
@@ -404,6 +456,8 @@ func (e *sonosExporter) getPositionSnapshot(ctx context.Context, sp *speaker) (p
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetPositionInfo failed")
 		return positionSnapshot{}, err
 	}
 	metadata := html.UnescapeString(parseXMLTag(resp, "TrackMetaData"))
@@ -436,50 +490,111 @@ func boolToFloat(v bool) float64 {
 	return 0
 }
 
-func discoverSonos(timeout time.Duration) ([]*speaker, error) {
+func (e *sonosExporter) fetchStaticSpeakers(targets []string) []*speaker {
+	client := &http.Client{Timeout: deviceReqTimeout}
+	var speakers []*speaker
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		location := fmt.Sprintf("http://%s:1400/xml/device_description.xml", target)
+		e.logger.Debug("fetching static target", "target", target, "location", location)
+		sp, err := speakerFromDescription(client, location)
+		if err != nil {
+			e.logger.Error("static target fetch failed", "target", target, "error", err)
+			continue
+		}
+		e.logger.Debug("static target resolved", "target", target, "udn", sp.UDN, "name", sp.Name)
+		speakers = append(speakers, sp)
+	}
+	return speakers
+}
+
+func discoverSonos(logger *slog.Logger, timeout time.Duration) ([]*speaker, error) {
 	conn, err := net.ListenPacket("udp4", ":0")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open UDP socket: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+
+	local := conn.LocalAddr()
+	logger.Debug("ssdp socket opened", "local_addr", local.String())
 
 	msg := strings.Join([]string{"M-SEARCH * HTTP/1.1", "HOST: 239.255.255.250:1900", "MAN: \"ssdp:discover\"", "MX: 1", "ST: " + sonosDeviceType, "", ""}, "\r\n")
 	dst, err := net.ResolveUDPAddr("udp4", ssdpAddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to resolve SSDP address: %w", err)
 	}
 	if _, err := conn.WriteTo([]byte(msg), dst); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send M-SEARCH to %s: %w", ssdpAddr, err)
 	}
+	logger.Debug("ssdp M-SEARCH sent", "dst", ssdpAddr, "st", sonosDeviceType)
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 
 	client := &http.Client{Timeout: deviceReqTimeout}
 	seen := map[string]struct{}{}
 	var speakers []*speaker
+	responseCount := 0
 	buf := make([]byte, 65535)
 	for {
-		n, _, err := conn.ReadFrom(buf)
+		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
 			if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
+				logger.Debug("ssdp read deadline reached", "responses", responseCount, "unique_locations", len(seen))
 				break
 			}
-			return nil, err
+			return nil, fmt.Errorf("ssdp read error: %w", err)
 		}
+		responseCount++
+		logger.Debug("ssdp response received", "from", addr.String(), "bytes", n)
 		location := extractLocation(string(buf[:n]))
 		if location == "" {
+			logger.Debug("ssdp response has no LOCATION header", "from", addr.String())
 			continue
 		}
 		if _, ok := seen[location]; ok {
 			continue
 		}
 		seen[location] = struct{}{}
+		logger.Debug("fetching device description", "location", location)
 		sp, err := speakerFromDescription(client, location)
 		if err != nil {
+			logger.Warn("failed to fetch device description", "location", location, "error", err)
 			continue
 		}
+		logger.Debug("ssdp speaker resolved", "udn", sp.UDN, "name", sp.Name, "host", sp.Host)
 		speakers = append(speakers, sp)
 	}
 	return speakers, nil
+}
+
+func logNetworkInterfaces(logger *slog.Logger) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		logger.Warn("failed to list network interfaces", "error", err)
+		return
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		var addrStrs []string
+		for _, a := range addrs {
+			addrStrs = append(addrStrs, a.String())
+		}
+		flags := iface.Flags.String()
+		logger.Info("network interface",
+			"name", iface.Name,
+			"flags", flags,
+			"addrs", strings.Join(addrStrs, ", "),
+			"multicast", iface.Flags&net.FlagMulticast != 0,
+		)
+	}
 }
 
 func extractLocation(resp string) string {
@@ -564,6 +679,8 @@ func (e *sonosExporter) getVolume(ctx context.Context, sp *speaker) (float64, er
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetVolume failed")
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentVolume"), 64)
@@ -574,6 +691,8 @@ func (e *sonosExporter) getPlaying(ctx context.Context, sp *speaker) (bool, erro
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetTransportInfo failed")
 		return false, err
 	}
 	state := strings.ToUpper(parseXMLTag(resp, "CurrentTransportState"))
@@ -674,15 +793,23 @@ func main() {
 	discoveryInterval := flag.Duration("sonos.discovery-interval", defaultDiscoveryInterval, "How often to rediscover speakers")
 	discoveryTimeout := flag.Duration("sonos.discovery-timeout", defaultDiscoveryTimeout, "How long SSDP discovery waits for responses")
 	speakerStaleAfter := flag.Duration("sonos.speaker-stale-after", defaultSpeakerStaleAfter, "How long to keep a speaker in cache without rediscovery (0 disables eviction)")
-	otelEndpoint := flag.String("otel.exporter.otlp.endpoint", "", "OTLP endpoint for OpenTelemetry logs and traces (e.g. localhost:4317)")
-	otelInsecure := flag.Bool("otel.exporter.otlp.insecure", true, "Use insecure OTLP gRPC connection")
+	staticTargetsStr := flag.String("sonos.static-targets", "", "Comma-separated list of Sonos speaker IPs or hostnames (bypasses SSDP discovery)")
 	flag.Parse()
+
+	var staticTargets []string
+	if *staticTargetsStr != "" {
+		for _, t := range strings.Split(*staticTargetsStr, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				staticTargets = append(staticTargets, t)
+			}
+		}
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := fallbackLogger()
-	if *otelEndpoint != "" {
-		shutdownTelemetry, otelLogger, err := initTelemetry(ctx, "sonos-exporter", *otelEndpoint, *otelInsecure)
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+		shutdownTelemetry, otelLogger, err := initTelemetry(ctx)
 		if err != nil {
 			logger.Error("failed to initialize OpenTelemetry, using fallback logger", "error", err)
 		} else {
@@ -697,8 +824,12 @@ func main() {
 		}
 	}
 
+	if len(staticTargets) > 0 {
+		logger.Info("static speaker targets configured", "targets", staticTargets)
+	}
+
 	exporter := newSonosExporterWithOptions(logger, *speakerStaleAfter)
-	go exporter.startDiscovery(ctx, *discoveryInterval, *discoveryTimeout)
+	go exporter.startDiscovery(ctx, *discoveryInterval, *discoveryTimeout, staticTargets)
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(exporter)

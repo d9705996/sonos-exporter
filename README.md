@@ -48,16 +48,27 @@ Flags:
 - `-sonos.discovery-interval` (default `60s`)
 - `-sonos.discovery-timeout` (default `3s`)
 - `-sonos.speaker-stale-after` (default `10m`, set `0` to keep speakers indefinitely even if offline)
-- `-otel.exporter.otlp.endpoint` (optional OTLP gRPC endpoint for logs/traces, e.g. `otel-collector:4317`)
-- `-otel.exporter.otlp.insecure` (default `true`, use plaintext OTLP gRPC)
+- `-sonos.static-targets` (comma-separated list of speaker IPs/hostnames, bypasses SSDP - **recommended for Docker**)
 
 
 ## OpenTelemetry
 
-When `-otel.exporter.otlp.endpoint` is set, the exporter sends:
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the exporter initialises OpenTelemetry and sends:
 
 - traces over OTLP gRPC
 - logs over OTLP gRPC
+
+Configuration uses the standard OTel environment variables — no CLI flags needed:
+
+| Variable | Example | Purpose |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4317` | OTLP gRPC endpoint (enables telemetry) |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext gRPC (default: TLS) |
+| `OTEL_SERVICE_NAME` | `sonos-exporter` | Override default service name |
+| `OTEL_RESOURCE_ATTRIBUTES` | `env=prod,region=us` | Additional resource attributes |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `api-key=secret` | Auth headers |
+
+See the full [OTLP Exporter Configuration](https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/) and [General SDK Configuration](https://opentelemetry.io/docs/languages/sdk-configuration/general/) docs for all supported variables.
 
 Telemetry includes spans around discovery and speaker metric collection calls, and structured logs are emitted through OpenTelemetry log pipelines.
 
@@ -79,7 +90,25 @@ scrape_configs:
 - Runtime collection uses Sonos APIs on port `1400`: RenderingControl (`GetVolume`, `GetMute`, `GetBass`, `GetTreble`, `GetLoudness`, `GetEQ`) and AVTransport (`GetTransportInfo`, `GetTransportSettings`, `GetPositionInfo`) plus `/status/zp`.
 - Exporter refreshes discovered speakers every 60 seconds by default (configurable via `-sonos.discovery-interval`).
 - Make sure UDP multicast and TCP access to Sonos speakers are allowed from where the exporter runs.
-- For Docker deployments (for example QNAP), `network_mode: host` is recommended so SSDP multicast discovery works reliably.
+- For Docker deployments (for example QNAP), either use `network_mode: host` or set `-sonos.static-targets` with your speaker IPs.
+- **SSDP multicast does not work with Docker bridge networking**. If you see `sonos_exporter_discovered_speakers 0`, use `-sonos.static-targets`.
+
+## Docker
+
+Option 1 — Host networking (SSDP works natively):
+
+```bash
+docker run --network=host ghcr.io/<owner>/sonos-exporter:latest
+```
+
+Option 2 — Bridge networking with static targets (no multicast needed):
+
+```bash
+docker run -p 9798:9798 ghcr.io/<owner>/sonos-exporter:latest \
+  -sonos.static-targets=192.168.1.10,192.168.1.11,192.168.1.12
+```
+
+You can find your Sonos speaker IPs in the Sonos app under Settings > System > About My System.
 
 ## CI/CD
 
