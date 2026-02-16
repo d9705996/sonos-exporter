@@ -852,3 +852,68 @@ func TestLogNetworkInterfaces(t *testing.T) {
 	// Should not panic; just exercises the code path
 	logNetworkInterfaces(slog.Default())
 }
+
+func TestInitTelemetryNoEndpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	// With no OTEL_EXPORTER_OTLP_ENDPOINT set, SDK defaults to localhost:4317.
+	// gRPC exporters connect lazily so creation succeeds.
+	shutdown, logger, err := initTelemetry(ctx)
+	if err != nil {
+		t.Fatalf("initTelemetry: %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("shutdown func should not be nil")
+	}
+	if logger == nil {
+		t.Fatal("logger should not be nil")
+	}
+	// Smoke-test: logger must not panic
+	logger.Info("test log from initTelemetry")
+
+	shutCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	// Shutdown may return an error when no real collector is available; that's fine
+	_ = shutdown(shutCtx)
+}
+
+func TestInitTelemetryWithEndpointEnvVar(t *testing.T) {
+	// Cannot use t.Parallel() with t.Setenv
+	// Set standard OTel env vars for this test
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+	t.Setenv("OTEL_SERVICE_NAME", "test-sonos")
+
+	ctx := context.Background()
+	shutdown, logger, err := initTelemetry(ctx)
+	if err != nil {
+		t.Fatalf("initTelemetry with env vars: %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("shutdown func should not be nil")
+	}
+	if logger == nil {
+		t.Fatal("logger should not be nil")
+	}
+	logger.Info("test message with env var endpoint")
+
+	shutCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = shutdown(shutCtx)
+}
+
+func TestInitTelemetrySecure(t *testing.T) {
+	t.Parallel()
+	// No OTEL_EXPORTER_OTLP_INSECURE set — defaults to secure (TLS)
+	ctx := context.Background()
+	shutdown, logger, err := initTelemetry(ctx)
+	if err != nil {
+		t.Fatalf("initTelemetry TLS mode: %v", err)
+	}
+	if logger == nil {
+		t.Fatal("logger should not be nil")
+	}
+	shutCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = shutdown(shutCtx)
+}

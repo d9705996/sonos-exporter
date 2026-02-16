@@ -49,16 +49,26 @@ Flags:
 - `-sonos.discovery-timeout` (default `3s`)
 - `-sonos.speaker-stale-after` (default `10m`, set `0` to keep speakers indefinitely even if offline)
 - `-sonos.static-targets` (comma-separated list of speaker IPs/hostnames, bypasses SSDP - **recommended for Docker**)
-- `-otel.exporter.otlp.endpoint` (optional OTLP gRPC endpoint for logs/traces, e.g. `otel-collector:4317`)
-- `-otel.exporter.otlp.insecure` (default `true`, use plaintext OTLP gRPC)
 
 
 ## OpenTelemetry
 
-When `-otel.exporter.otlp.endpoint` is set, the exporter sends:
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the exporter initialises OpenTelemetry and sends:
 
 - traces over OTLP gRPC
 - logs over OTLP gRPC
+
+Configuration uses the standard OTel environment variables — no CLI flags needed:
+
+| Variable | Example | Purpose |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4317` | OTLP gRPC endpoint (enables telemetry) |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext gRPC (default: TLS) |
+| `OTEL_SERVICE_NAME` | `sonos-exporter` | Override default service name |
+| `OTEL_RESOURCE_ATTRIBUTES` | `env=prod,region=us` | Additional resource attributes |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `api-key=secret` | Auth headers |
+
+See the full [OTLP Exporter Configuration](https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/) and [General SDK Configuration](https://opentelemetry.io/docs/languages/sdk-configuration/general/) docs for all supported variables.
 
 Telemetry includes spans around discovery and speaker metric collection calls, and structured logs are emitted through OpenTelemetry log pipelines.
 

@@ -25,6 +25,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -165,6 +167,8 @@ func (e *sonosExporter) refreshSpeakers(ctx context.Context, discoveryTimeout ti
 	e.logger.Info("ssdp discovery starting", "timeout", discoveryTimeout.String())
 	ssdpSpeakers, err := discoverSonos(e.logger, discoveryTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "ssdp discovery failed")
 		e.logger.Error("ssdp discovery failed", "error", err)
 	} else {
 		e.logger.Info("ssdp discovery complete", "found", len(ssdpSpeakers))
@@ -292,7 +296,13 @@ func (e *sonosExporter) Collect(ch chan<- prometheus.Metric) {
 		wg.Add(1)
 		go func(idx int, sp *speaker) {
 			defer wg.Done()
-			ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect")
+			ctxSpeaker, span := e.tracer.Start(ctx, "speaker.collect",
+				trace.WithAttributes(
+					attribute.String("sonos.speaker.name", sp.Name),
+					attribute.String("sonos.speaker.udn", sp.UDN),
+					attribute.String("sonos.speaker.host", sp.Host),
+				),
+			)
 			defer span.End()
 			m := &results[idx]
 			m.sp = sp
@@ -366,6 +376,8 @@ func (e *sonosExporter) getSubLevel(ctx context.Context, sp *speaker) (float64, 
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetEQ", map[string]string{"InstanceID": "0", "EQType": "SubGain"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetEQ failed")
 		return 0, err
 	}
 	v := parseXMLTag(resp, "CurrentValue")
@@ -380,6 +392,8 @@ func (e *sonosExporter) getMute(ctx context.Context, sp *speaker) (bool, error) 
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetMute", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetMute failed")
 		return false, err
 	}
 	return parseXMLTag(resp, "CurrentMute") == "1", nil
@@ -390,6 +404,8 @@ func (e *sonosExporter) getBass(ctx context.Context, sp *speaker) (float64, erro
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetBass", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetBass failed")
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentBass"), 64)
@@ -400,6 +416,8 @@ func (e *sonosExporter) getTreble(ctx context.Context, sp *speaker) (float64, er
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetTreble", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetTreble failed")
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentTreble"), 64)
@@ -410,6 +428,8 @@ func (e *sonosExporter) getLoudness(ctx context.Context, sp *speaker) (bool, err
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetLoudness", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetLoudness failed")
 		return false, err
 	}
 	return parseXMLTag(resp, "CurrentLoudness") == "1", nil
@@ -420,6 +440,8 @@ func (e *sonosExporter) getPlayMode(ctx context.Context, sp *speaker) (string, e
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportSettings", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetTransportSettings failed")
 		return "", err
 	}
 	mode := strings.TrimSpace(parseXMLTag(resp, "PlayMode"))
@@ -434,6 +456,8 @@ func (e *sonosExporter) getPositionSnapshot(ctx context.Context, sp *speaker) (p
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetPositionInfo failed")
 		return positionSnapshot{}, err
 	}
 	metadata := html.UnescapeString(parseXMLTag(resp, "TrackMetaData"))
@@ -655,6 +679,8 @@ func (e *sonosExporter) getVolume(ctx context.Context, sp *speaker) (float64, er
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.RenderingURL, renderingControlService, "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetVolume failed")
 		return 0, err
 	}
 	return strconv.ParseFloat(parseXMLTag(resp, "CurrentVolume"), 64)
@@ -665,6 +691,8 @@ func (e *sonosExporter) getPlaying(ctx context.Context, sp *speaker) (bool, erro
 	defer span.End()
 	resp, err := e.soapCall(ctx, sp.AVTransportURL, avTransportService, "GetTransportInfo", map[string]string{"InstanceID": "0"}, soapTimeout)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "GetTransportInfo failed")
 		return false, err
 	}
 	state := strings.ToUpper(parseXMLTag(resp, "CurrentTransportState"))
@@ -766,8 +794,6 @@ func main() {
 	discoveryTimeout := flag.Duration("sonos.discovery-timeout", defaultDiscoveryTimeout, "How long SSDP discovery waits for responses")
 	speakerStaleAfter := flag.Duration("sonos.speaker-stale-after", defaultSpeakerStaleAfter, "How long to keep a speaker in cache without rediscovery (0 disables eviction)")
 	staticTargetsStr := flag.String("sonos.static-targets", "", "Comma-separated list of Sonos speaker IPs or hostnames (bypasses SSDP discovery)")
-	otelEndpoint := flag.String("otel.exporter.otlp.endpoint", "", "OTLP endpoint for OpenTelemetry logs and traces (e.g. localhost:4317)")
-	otelInsecure := flag.Bool("otel.exporter.otlp.insecure", true, "Use insecure OTLP gRPC connection")
 	flag.Parse()
 
 	var staticTargets []string
@@ -782,8 +808,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := fallbackLogger()
-	if *otelEndpoint != "" {
-		shutdownTelemetry, otelLogger, err := initTelemetry(ctx, "sonos-exporter", *otelEndpoint, *otelInsecure)
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+		shutdownTelemetry, otelLogger, err := initTelemetry(ctx)
 		if err != nil {
 			logger.Error("failed to initialize OpenTelemetry, using fallback logger", "error", err)
 		} else {
