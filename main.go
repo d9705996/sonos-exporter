@@ -817,6 +817,29 @@ func xmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;").Replace(s)
 }
 
+func envVarNameForFlag(name string) string {
+	replacer := strings.NewReplacer("-", "_", ".", "_")
+	return "SONOS_EXPORTER_" + strings.ToUpper(replacer.Replace(name))
+}
+
+func applyEnvToFlags(fs *flag.FlagSet) error {
+	var errs []error
+	fs.VisitAll(func(f *flag.Flag) {
+		envName := envVarNameForFlag(f.Name)
+		envVal, ok := os.LookupEnv(envName)
+		if !ok {
+			return
+		}
+		if err := fs.Set(f.Name, envVal); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", envName, err))
+		}
+	})
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.Join(errs...)
+}
+
 func main() {
 	listenAddr := flag.String("web.listen-address", ":9798", "Address to listen on for HTTP requests")
 	metricsPath := flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
@@ -824,6 +847,10 @@ func main() {
 	discoveryTimeout := flag.Duration("sonos.discovery-timeout", defaultDiscoveryTimeout, "How long SSDP discovery waits for responses")
 	speakerStaleAfter := flag.Duration("sonos.speaker-stale-after", defaultSpeakerStaleAfter, "How long to keep a speaker in cache without rediscovery (0 disables eviction)")
 	staticTargetsStr := flag.String("sonos.static-targets", "", "Comma-separated list of Sonos speaker IPs or hostnames (bypasses SSDP discovery)")
+	if err := applyEnvToFlags(flag.CommandLine); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "invalid environment flag value: %v\n", err)
+		os.Exit(2)
+	}
 	flag.Parse()
 
 	var staticTargets []string

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -247,6 +248,49 @@ func TestSpeakerFromDescriptionUsesSoftwareVersion(t *testing.T) {
 }
 
 // --- Unit tests for utility functions ---
+
+func TestEnvVarNameForFlag(t *testing.T) {
+	t.Parallel()
+	if got, want := envVarNameForFlag("sonos.discovery-interval"), "SONOS_EXPORTER_SONOS_DISCOVERY_INTERVAL"; got != want {
+		t.Fatalf("unexpected env var name: got %q want %q", got, want)
+	}
+	if got, want := envVarNameForFlag("web.listen-address"), "SONOS_EXPORTER_WEB_LISTEN_ADDRESS"; got != want {
+		t.Fatalf("unexpected env var name: got %q want %q", got, want)
+	}
+}
+
+func TestApplyEnvToFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	listen := fs.String("web.listen-address", ":9798", "")
+	interval := fs.Duration("sonos.discovery-interval", defaultDiscoveryInterval, "")
+	t.Setenv("SONOS_EXPORTER_WEB_LISTEN_ADDRESS", ":9999")
+	t.Setenv("SONOS_EXPORTER_SONOS_DISCOVERY_INTERVAL", "15s")
+
+	if err := applyEnvToFlags(fs); err != nil {
+		t.Fatalf("applyEnvToFlags failed: %v", err)
+	}
+
+	if *listen != ":9999" {
+		t.Fatalf("expected listen address from env, got %q", *listen)
+	}
+	if *interval != 15*time.Second {
+		t.Fatalf("expected interval from env, got %s", *interval)
+	}
+}
+
+func TestApplyEnvToFlagsInvalid(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	_ = fs.Duration("sonos.discovery-interval", defaultDiscoveryInterval, "")
+	t.Setenv("SONOS_EXPORTER_SONOS_DISCOVERY_INTERVAL", "not-a-duration")
+
+	err := applyEnvToFlags(fs)
+	if err == nil {
+		t.Fatal("expected error for invalid env var")
+	}
+	if !strings.Contains(err.Error(), "SONOS_EXPORTER_SONOS_DISCOVERY_INTERVAL") {
+		t.Fatalf("expected env var name in error, got %v", err)
+	}
+}
 
 func TestParseXMLTag(t *testing.T) {
 	t.Parallel()
